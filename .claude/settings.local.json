@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(miniwdl check:*)",
+      "WebFetch(domain:biognosys.com)",
+      "Bash(dos2unix:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
