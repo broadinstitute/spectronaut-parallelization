@@ -645,18 +645,26 @@ task spectronaut_search_vm {
         if [ -f "${final_sne}" ]; then
             echo "Spectronaut produced expected SNE file: ${final_sne}" >&2
         else
-            sne_file=$(find "${output_dir}" -maxdepth 1 -type f -name "*.sne" | head -n 1)
-            if [ -z "${sne_file}" ]; then
+            echo "Locating SNE file within ${output_dir}" >&2
+            mapfile -t sne_candidates < <(find "${output_dir}" -type f -name "*.sne")
+
+            if [ ${#sne_candidates[@]} -eq 0 ]; then
                 echo "ERROR: No SNE file produced for shard ${suffix}" >&2
                 echo "Contents of output directory:" >&2
                 find "${output_dir}" -type f >&2
                 exit 1
             fi
 
+            sne_file="${sne_candidates[0]}"
+            if [ ${#sne_candidates[@]} -gt 1 ]; then
+                echo "WARNING: Multiple SNE files detected; selecting ${sne_file}" >&2
+                printf '  candidate: %s\n' "${sne_candidates[@]}" >&2
+            fi
+
             if [ "${sne_file}" != "${final_sne}" ]; then
-                echo "Renaming ${sne_file} to ${final_sne}" >&2
+                echo "Relocating ${sne_file} to ${final_sne}" >&2
                 if ! mv "${sne_file}" "${final_sne}"; then
-                    echo "ERROR: Failed to rename SNE file" >&2
+                    echo "ERROR: Failed to move SNE file into ${output_dir}" >&2
                     exit 1
                 fi
             else
@@ -677,7 +685,11 @@ task spectronaut_search_vm {
 
         # Write the actual SNE filename to a file for WDL to read
         # This ensures WDL uses the exact same filename the bash script created
-        printf '%s' "${exp_name}.sne" > sne_filename.txt
+        printf '%s\n' "${exp_name}.sne" > sne_filename.txt
+        if [ ! -s sne_filename.txt ]; then
+            echo "ERROR: sne_filename.txt is empty; expected ${exp_name}.sne" >&2
+            exit 1
+        fi
         echo "SNE filename written to sne_filename.txt: ${exp_name}.sne" >&2
 
         # Preserve log alongside shard outputs for delocalization
