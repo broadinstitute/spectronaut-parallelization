@@ -1,26 +1,26 @@
 version development
 
-workflow spectronaut_htrms_conversion {
+workflow parallel_spectronaut {
     input {
         Boolean do_conversion = true
         Boolean do_search = true
         String file_directory
-        String? experiment_name # Not required if only doing conversion
+        String experiment_name # Required when do_search=true
         File? convert_schema
-        File? fasta_1 # Not required if only doing conversion
+        File fasta_1 # Required when do_search=true
         File? fasta_2
         File? fasta_3
         File? analysis_schema # Contains schema for Pulsar search and library generation steps 
         File? enzyme_database
-        File? spectral_library_1
-        File? spectral_library_2
+        # File? spectral_library_1
+        # File? spectral_library_2
         File? report_schema_1
         File? report_schema_2
         File? report_schema_3
         File? report_schema_4
         File? json_settings
         Int archive_generation_disk_gb = 1000 
-        Int search_disk_size_gb = 2000
+        Int search_disk_size_gb = 2000 # If files are stored in GCS bucket, they will be first downloaded to the local disk for processing, so larger disk size may be needed 
         Int sne_combine_disk_gb = 2000
     }
 
@@ -29,7 +29,7 @@ workflow spectronaut_htrms_conversion {
         gcs_path = file_directory,
     }
 
-    Array[String] file_paths = read_lines(list_files.file_list)
+    Array[File] file_paths = read_lines(list_files.file_list)
 
     # Spectronaut Search
     # Step 1: Search archive generation - low RAM, high CPU --> scatter
@@ -51,11 +51,12 @@ workflow spectronaut_htrms_conversion {
         scatter (htrms_file in htrms_conversion.htrms_files) {
             call archive_generation { input:
                 input_file = htrms_file,
-                experiment_name = experiment_name, 
+                # experiment_name = experiment_name,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
-                analysis_schema = analysis_schema, 
+                analysis_schema = analysis_schema,
+                enzyme_database = enzyme_database,
                 disk_gb = archive_generation_disk_gb,
             }
         }
@@ -71,6 +72,7 @@ workflow spectronaut_htrms_conversion {
         scatter (htrms_file in htrms_conversion.htrms_files) {
             call dia_analysis { input:
                 input_file = htrms_file,
+                analysis_schema = analysis_schema,
                 search_archive = merge_archives.merged_archive,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
@@ -98,78 +100,79 @@ workflow spectronaut_htrms_conversion {
         }
     }
 
-    # Scenario 2: do_conversion=false + file_directory (either unconverted raw files or HTRMS files)
-    if (!do_conversion && do_search) {
-        # Input files are scattered to generate search archives
-        scatter (input_file in file_paths) {
-            call archive_generation as archive_generation_s2 { input:
-                input_file = input_file,
-                fasta_1 = fasta_1,
-                fasta_2 = fasta_2,
-                fasta_3 = fasta_3,
-                analysis_schema = analysis_schema,
-                enzyme_database = enzyme_database,
-                disk_gb = archive_generation_disk_gb,
-            }
-        }
+    # # Scenario 2: do_conversion=false + file_directory (either unconverted raw files or HTRMS files)
+    # if (!do_conversion && do_search) {
+    #     # Input files are scattered to generate search archives
+    #     scatter (input_file in file_paths) {
+    #         call archive_generation as archive_generation_s2 { input:
+    #             input_file = input_file,
+    #             fasta_1 = fasta_1,
+    #             fasta_2 = fasta_2,
+    #             fasta_3 = fasta_3,
+    #             analysis_schema = analysis_schema,
+    #             enzyme_database = enzyme_database,
+    #             disk_gb = archive_generation_disk_gb,
+    #         }
+    #     }
 
-        # Individual search archives are combined into one search archive
-        # e.g., spectronaut lg -se Pulsar -sa intermediate/search_archive1.psar -sa intermediate/search_archive2.psar ... -k intermediate/output_library.kit -o intermediate
-        call merge_archives as merge_archives_s2 { input:
-            input_archives = archive_generation_s2.search_archives,
-        }
+    #     # Individual search archives are combined into one search archive
+    #     # e.g., spectronaut lg -se Pulsar -sa intermediate/search_archive1.psar -sa intermediate/search_archive2.psar ... -k intermediate/output_library.kit -o intermediate
+    #     call merge_archives as merge_archives_s2 { input:
+    #         input_archives = archive_generation_s2.search_archives,
+    #     }
 
-        # HTRMS files are scattered to perform DIA analysis using the combined search archive
-        # e.g., spectronaut diaanalysis -o intermediate -a intermediate/output_library.kit -d raw -fasta fasta/20210709-SP_mouse_isoforms_UP000000589.fasta -fasta fasta/crap.2009.05.01.fasta -n "PXD032759"
-        scatter (data_file in file_paths) {
-            call dia_analysis as dia_analysis_s2 { input:
-                input_file = data_file,
-                search_archive = merge_archives_s2.merged_archive,
-                fasta_1 = fasta_1,
-                fasta_2 = fasta_2,
-                fasta_3 = fasta_3,
-                experiment_name = experiment_name,
-                json_settings = json_settings,
-                disk_gb = search_disk_size_gb,
-            }
-        }
+    #     # HTRMS files are scattered to perform DIA analysis using the combined search archive
+    #     # e.g., spectronaut diaanalysis -o intermediate -a intermediate/output_library.kit -d raw -fasta fasta/20210709-SP_mouse_isoforms_UP000000589.fasta -fasta fasta/crap.2009.05.01.fasta -n "PXD032759"
+    #     scatter (data_file in file_paths) {
+    #         call dia_analysis as dia_analysis_s2 { input:
+    #             input_file = data_file,
+    #             search_archive = merge_archives_s2.merged_archive,
+    #             analysis_schema = analysis_schema,
+    #             fasta_1 = fasta_1,
+    #             fasta_2 = fasta_2,
+    #             fasta_3 = fasta_3,
+    #             experiment_name = experiment_name,
+    #             json_settings = json_settings,
+    #             disk_gb = search_disk_size_gb,
+    #         }
+    #     }
 
-        # Individual SNE files are combined into one final SNE file with reports generated
-        # e.g., spectronaut manageSNE --merge -o results -sne intermediate/<subfolder1>/<timestamp>_PXD032759.sne -sne intermediate/<subfolder2>/<timestamp>_PXD032759.sne ... -o results
-        call sne_combine as sne_combine_s2 { input:
-            input_sne = dia_analysis_s2.sne_files,
-            experiment_name = experiment_name,
-            fasta_1 = fasta_1,
-            fasta_2 = fasta_2,
-            fasta_3 = fasta_3,
-            report_schema_1 = report_schema_1,
-            report_schema_2 = report_schema_2,
-            report_schema_3 = report_schema_3,
-            report_schema_4 = report_schema_4,
-            analysis_schema = analysis_schema,
-            disk_gb = sne_combine_disk_gb,
-        }
-    }
+    #     # Individual SNE files are combined into one final SNE file with reports generated
+    #     # e.g., spectronaut manageSNE --merge -o results -sne intermediate/<subfolder1>/<timestamp>_PXD032759.sne -sne intermediate/<subfolder2>/<timestamp>_PXD032759.sne ... -o results
+    #     call sne_combine as sne_combine_s2 { input:
+    #         input_sne = dia_analysis_s2.sne_files,
+    #         experiment_name = experiment_name,
+    #         fasta_1 = fasta_1,
+    #         fasta_2 = fasta_2,
+    #         fasta_3 = fasta_3,
+    #         report_schema_1 = report_schema_1,
+    #         report_schema_2 = report_schema_2,
+    #         report_schema_3 = report_schema_3,
+    #         report_schema_4 = report_schema_4,
+    #         analysis_schema = analysis_schema,
+    #         disk_gb = sne_combine_disk_gb,
+    #     }
+    # }
 
     output {
         File discovered_inputs = list_files.file_list
         Array[File]? converted_htrms = htrms_conversion.htrms_files
-        Array[File]? search_archives = select_first([
+        Array[File]? search_archives = if do_search then select_first([
             archive_generation.search_archives,
             archive_generation_s2.search_archives,
-        ])
-        File? merged_library = select_first([
+        ]) else None
+        File? merged_library = if do_search then select_first([
             merge_archives.merged_archive,
             merge_archives_s2.merged_archive,
-        ])
-        Array[File]? individual_sne_files = select_first([
+        ]) else None
+        Array[File]? individual_sne_files = if do_search then select_first([
             dia_analysis.sne_files,
             dia_analysis_s2.sne_files,
-        ])
-        File? combined_output = select_first([
+        ]) else None
+        File? combined_output = if do_search then select_first([
             sne_combine.spectronaut_output,
             sne_combine_s2.spectronaut_output,
-        ])
+        ]) else None
     }
 }
 
@@ -290,6 +293,7 @@ task htrms_conversion {
             exit 1
         fi
 
+        # Copying to expected_output ensures the file is in the current working directory with a matching filename so that Cromwell can properly delocalize it to the execution bucket 
         echo "Found converted file: ${converted_file}" >&2
         if ! cp "${converted_file}" "${expected_output}"; then
             echo "ERROR: Failed to copy converted output" >&2
@@ -313,21 +317,21 @@ task htrms_conversion {
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 128
-        disks: "local-disk 512 SSD"
+        disks: "local-disk 1000 SSD"
         preemptible: 0
     }
 }
 
 task archive_generation {
     input {
-        String input_file
+        File input_file # Cromwell automatically localizes File inputs to the task execution directory
         File fasta_1
         File? fasta_2
         File? fasta_3
-        File? analysis_schema
+        File? analysis_schema # TEST if individual Pulsar search and library generation schemas are required
         File? enzyme_database
-        String? experiment_name
-        Int disk_gb = 2000
+        # String experiment_name # Without providing experiment_name in the spectronaut command, spectronaut will use the input file name as the experiment name by default
+        Int disk_gb = 1000
     }
 
     command <<<
@@ -338,21 +342,12 @@ task archive_generation {
 
         data_dir=$(mktemp -d data_XXXXXX)
 
-        # Copy HTRMS file from GCS if needed
-        if [[ "~{input_file}" == gs://* ]]; then
-            echo "Downloading from GCS: ~{input_file}" >&2
-            if ! gcloud storage cp -r "~{input_file}" "${data_dir}/"; then
-                echo "ERROR: Failed to download file from GCS" >&2
-                rm -rf "${data_dir}"
-                exit 1
-            fi
-        else
-            echo "Copying local file: ~{input_file}" >&2
-            if ! cp "~{input_file}" "${data_dir}/"; then
-                echo "ERROR: Failed to copy local file" >&2
-                rm -rf "${data_dir}"
-                exit 1
-            fi
+        # Copy input file to data directory (handles both regular files and timsTOF .d directories)
+        echo "Copying input file to data directory..." >&2
+        if ! cp -r "~{input_file}" "${data_dir}/"; then
+            echo "ERROR: Failed to copy input file" >&2
+            rm -rf "${data_dir}"
+            exit 1
         fi
 
         echo "Data directory contents:" >&2
@@ -361,13 +356,13 @@ task archive_generation {
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..." >&2
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{
-                enzyme_database}"
+            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
         # Generate unique archive name based on input file
         input_basename=$(basename "~{input_file}")
-        archive_basename="${input_basename%.*}"
+        # Remove known file extensions to match WDL output block regex
+        archive_basename=$(echo "${input_basename}" | sed -E 's/\.(htrms|raw|d|HTRMS|RAW|D)$//')
         archive_output="${archive_basename}.psar"
         library_output="${archive_basename}.kit"
 
@@ -377,10 +372,10 @@ task archive_generation {
             -fasta "~{fasta_1}" \
             ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
             ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(analysis_schema) then "-rs " + analysis_schema else ""} \
-            ~{if defined(analysis_schema) then "-es " + analysis_schema else ""} \
+            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
             -a "${archive_output}" \
             -k "${library_output}" 2>&1 | tee archive_generation.log
+        # Output both search archive and spectral library 
 
         archive_status=${PIPESTATUS[0]}
         if [ "${archive_status}" -ne 0 ]; then
@@ -407,6 +402,20 @@ task archive_generation {
             exit 1
         fi
 
+        # # If above code fails to locate the generated archive and spectral library, use "find" to look deeper into subdirectories 
+        # if [ ! -f "${archive_output}" ]; then
+        #     echo "Archive not in current directory, searching..." >&2
+        #     found_archive=$(find . -type f -name "*.psar" | head -n 1)
+        #     if [ -z "${found_archive}" ]; then
+        #         echo "ERROR: Search archive file not found: ${archive_output}" >&2
+        #         echo "Current directory contents:" >&2
+        #         ls -lhR >&2
+        #         rm -rf "${data_dir}"
+        #         exit 1
+        #     fi
+        #     cp "${found_archive}" "${archive_output}"
+        # fi
+
         echo "Search archive generated: ${archive_output}" >&2
         ls -lh "${archive_output}" >&2
         echo "Library generated: ${library_output}" >&2
@@ -419,12 +428,14 @@ task archive_generation {
     output {
         File search_archives = sub(basename(input_file), "\\.(htrms|raw|d|HTRMS|RAW|D)$", ""
             ) + ".psar"
+        # File spectral_libraries = sub(basename(input_file), "\\.(htrms|raw|d|HTRMS|RAW|D)$", ""
+        #     ) + ".kit"
     }
 
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.0"
-        cpu: 32
-        memory: "64GB"
+        cpu: 128 # archive generation is CPU intensive 
+        memory: "256GB"
         bootDiskSizeGb: 128
         disks: "local-disk ~{disk_gb} SSD"
         preemptible: 0
@@ -517,8 +528,8 @@ task merge_archives {
 
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.0"
-        cpu: 16
-        memory: "256GB"
+        cpu: 32
+        memory: "512GB" # Memory intensive - 896GB is the max allowed on N2D VMs
         bootDiskSizeGb: 128
         disks: "local-disk 2000 SSD"
         preemptible: 0
@@ -528,9 +539,10 @@ task merge_archives {
 task dia_analysis {
     input {
         File search_archive
-        File fasta_1
-        String input_file
+        File input_file # Cromwell automatically localizes File inputs to the task execution directory
         String experiment_name
+        File? analysis_schema
+        File fasta_1
         File? fasta_2
         File? fasta_3
         File? json_settings
@@ -548,21 +560,12 @@ task dia_analysis {
         output_dir=$(mktemp -d output_XXXXXX)
         temp_dir=$(mktemp -d temp_XXXXXX)
 
-        # Copy HTRMS file from GCS if needed
-        if [[ "~{input_file}" == gs://* ]]; then
-            echo "Downloading from GCS: ~{input_file}" >&2
-            if ! gcloud storage cp "~{input_file}" "${data_dir}/"; then
-                echo "ERROR: Failed to download file from GCS" >&2
-                rm -rf "${data_dir}" "${output_dir}" "${temp_dir}"
-                exit 1
-            fi
-        else
-            echo "Copying local file: ~{input_file}" >&2
-            if ! cp "~{input_file}" "${data_dir}/"; then
-                echo "ERROR: Failed to copy local file" >&2
-                rm -rf "${data_dir}" "${output_dir}" "${temp_dir}"
-                exit 1
-            fi
+        # Copy input file to data directory (handles both regular files and timsTOF .d directories)
+        echo "Copying input file to data directory..." >&2
+        if ! cp -r "~{input_file}" "${data_dir}/"; then
+            echo "ERROR: Failed to copy input file" >&2
+            rm -rf "${data_dir}" "${output_dir}" "${temp_dir}"
+            exit 1
         fi
 
         echo "Data directory contents:" >&2
@@ -570,8 +573,8 @@ task dia_analysis {
 
         # Generate unique experiment name to avoid .sne file collisions
         input_basename=$(basename "~{input_file}")
-        file_hash=$(echo "${input_basename}" | md5sum | cut -c1-8)
-        unique_exp_name="~{experiment_name}_${file_hash}"
+        file_basename="${input_basename%.*}"  # Remove extension
+        unique_exp_name="~{experiment_name}_${file_basename}"
 
         echo "Unique experiment name: ${unique_exp_name}" >&2
 
@@ -580,6 +583,7 @@ task dia_analysis {
             -o "${output_dir}" \
             -a "~{search_archive}" \
             -d "${data_dir}" \
+            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
             -fasta "~{fasta_1}" \
             ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
             ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
@@ -596,7 +600,7 @@ task dia_analysis {
 
         # Find the .sne file (may be in timestamped subdirectory)
         echo "Locating SNE file in output directory..." >&2
-        sne_file=$(find "${output_dir}" -type f -name "*.sne" | head -n 1)
+        sne_file=$(find "${output_dir}" -type f -name "*.sne" | head -n 1) # Look deep into subdirectories 
 
         if [ -z "${sne_file}" ]; then
             echo "ERROR: No SNE file produced" >&2
@@ -623,14 +627,13 @@ task dia_analysis {
     >>>
 
     output {
-        File sne_files = experiment_name + "_" + sub(sub(basename(input_file), "\\.(htrms|raw|d|HTRMS|RAW|D)$",
-            ""), "^(.{0,8}).*", "$1") + ".sne"
+        File sne_files = experiment_name + "_" + sub(basename(input_file), "\\.(htrms|raw|d|HTRMS|RAW|D)$", "") + ".sne"
     }
 
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.0"
-        cpu: 32
-        memory: "128GB"
+        cpu: 128 # CPU intensive 
+        memory: "256GB"
         bootDiskSizeGb: 128
         disks: "local-disk ~{disk_gb} SSD"
         preemptible: 0
@@ -664,7 +667,6 @@ task sne_combine {
                     exit 1
                 fi
 
-                cromwell_root=$(pwd)
                 out_dir="combined_output"
                 out_zip="spectronaut_output.zip"
 
@@ -703,7 +705,7 @@ task sne_combine {
 
                 echo "Running Spectronaut combine..." >&2
                 # shellcheck disable=SC2086
-                eval spectronaut -combine \
+                eval spectronaut combine \
                     -n "~{experiment_name}" \
                     -o "${out_dir}" \
                     ${sne_args} \
@@ -739,8 +741,6 @@ task sne_combine {
                     exit 1
                 fi
 
-                mv "${out_zip}" /"${cromwell_root}"/
-
                 if [ ! -f "${out_zip}" ]; then
                     echo "ERROR: Archive not found after creation: ${out_zip}" >&2
                     exit 1
@@ -757,7 +757,7 @@ task sne_combine {
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.0"
         cpu: 32
-        memory: "256GB"
+        memory: "512GB"
         bootDiskSizeGb: 512
         disks: "local-disk ~{disk_gb} SSD"
         preemptible: 0
