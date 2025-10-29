@@ -3,7 +3,8 @@
     "allow": [
       "Bash(miniwdl check:*)",
       "WebFetch(domain:biognosys.com)",
-      "Bash(dos2unix:*)"
+      "Bash(dos2unix:*)",
+      "Bash(command -v miniwdl:*)"
     ],
     "deny": [],
     "ask": []

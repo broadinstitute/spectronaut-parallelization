@@ -159,19 +159,19 @@ workflow parallel_spectronaut {
         Array[File]? converted_htrms = htrms_conversion.htrms_files
         Array[File]? search_archives = if do_search then select_first([
             archive_generation.search_archives,
-            archive_generation_s2.search_archives,
+            # archive_generation_s2.search_archives,
         ]) else None
         File? merged_library = if do_search then select_first([
             merge_archives.merged_archive,
-            merge_archives_s2.merged_archive,
+            # merge_archives_s2.merged_archive,
         ]) else None
         Array[File]? individual_sne_files = if do_search then select_first([
             dia_analysis.sne_files,
-            dia_analysis_s2.sne_files,
+            # dia_analysis_s2.sne_files,
         ]) else None
         File? combined_output = if do_search then select_first([
             sne_combine.spectronaut_output,
-            sne_combine_s2.spectronaut_output,
+            # sne_combine_s2.spectronaut_output,
         ]) else None
     }
 }
@@ -263,15 +263,15 @@ task htrms_conversion {
         echo "Input directory contents:" >&2
         ls -lhR "${tmp_root}" >&2
 
-        # The output should have the same base name as the input, but with .htrms extension
-        input_basename=$(basename "~{input_file_path}")
-        expected_basename=$(echo "${input_basename}" | sed -E 's/\.(raw|d|RAW|D)$//')
-        if [ -z "${expected_basename}" ]; then
-            expected_basename="${input_basename}"
-        fi
-        expected_output="${expected_basename}.htrms"
+        # # The output should have the same base name as the input, but with .htrms extension
+        # input_basename=$(basename "~{input_file_path}")
+        # expected_basename=$(echo "${input_basename}" | sed -E 's/\.(raw|d|RAW|D)$//')
+        # if [ -z "${expected_basename}" ]; then
+        #     expected_basename="${input_basename}"
+        # fi
+        # expected_output="${expected_basename}.htrms"
 
-        echo "Running Spectronaut conversion for ${input_basename}" >&2
+        echo "Running Spectronaut conversion for ${output_dir}" >&2
         spectronaut -convert \
             -i "${tmp_root}" \
             -o "${output_dir}" \
@@ -285,31 +285,14 @@ task htrms_conversion {
         fi
 
         echo "Conversion finished; locating HTRMS output" >&2
-        converted_file=$(find "${output_dir}" -type f -name "*.htrms" | head -n 1)
-        if [ -z "${converted_file}" ]; then
-            echo "ERROR: No .htrms file was produced" >&2
-            find "${output_dir}" -type f >&2
-            rm -rf "${tmp_root}" "${output_dir}"
-            exit 1
-        fi
-
-        # Copying to expected_output ensures the file is in the current working directory with a matching filename so that Cromwell can properly delocalize it to the execution bucket 
-        echo "Found converted file: ${converted_file}" >&2
-        if ! cp "${converted_file}" "${expected_output}"; then
-            echo "ERROR: Failed to copy converted output" >&2
-            rm -rf "${tmp_root}" "${output_dir}"
-            exit 1
-        fi
-
-        echo "Cleaning up raw input clones to conserve disk space" >&2
-        rm -rf "${tmp_root}" "${output_dir}"
-
-        echo "Produced HTRMS file: ${expected_output}" >&2
-        ls -lh "${expected_output}" >&2
+        
+        # Find and write the full path of the converted file
+        find "${output_dir}" -type f -name "*.htrms" -print -quit > converted.txt
+        cat converted.txt >&2
     >>>
 
     output {
-        File htrms_files = sub(basename(input_file_path), "\\.(raw|d|RAW|D)$", "") + ".htrms"
+        File htrms_files = read_string("converted.txt")
     }
 
     runtime {
@@ -340,18 +323,18 @@ task archive_generation {
         echo "=== Spectronaut search archive generation ===" >&2
         echo "Input file: ~{input_file}" >&2
 
-        data_dir=$(mktemp -d data_XXXXXX)
+        # data_dir=$(mktemp -d data_XXXXXX)
 
-        # Copy input file to data directory (handles both regular files and timsTOF .d directories)
-        echo "Copying input file to data directory..." >&2
-        if ! cp -r "~{input_file}" "${data_dir}/"; then
-            echo "ERROR: Failed to copy input file" >&2
-            rm -rf "${data_dir}"
-            exit 1
-        fi
+        # # Copy input file to data directory (handles both regular files and timsTOF .d directories)
+        # echo "Copying input file to data directory..." >&2
+        # if ! cp -r "~{input_file}" "${data_dir}/"; then
+        #     echo "ERROR: Failed to copy input file" >&2
+        #     rm -rf "${data_dir}"
+        #     exit 1
+        # fi
 
-        echo "Data directory contents:" >&2
-        ls -lh "${data_dir}" >&2
+        # echo "Data directory contents:" >&2
+        # ls -lh "${data_dir}" >&2
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
@@ -359,48 +342,52 @@ task archive_generation {
             dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        # Generate unique archive name based on input file
-        input_basename=$(basename "~{input_file}")
-        # Remove known file extensions to match WDL output block regex
-        archive_basename=$(echo "${input_basename}" | sed -E 's/\.(htrms|raw|d|HTRMS|RAW|D)$//')
-        archive_output="${archive_basename}.psar"
-        library_output="${archive_basename}.kit"
+        # # Generate unique archive name based on input file
+        # input_basename=$(basename "~{input_file}")
+        # # Remove known file extensions to match WDL output block regex
+        # archive_basename=$(echo "${input_basename}" | sed -E 's/\.(htrms|raw|d|HTRMS|RAW|D)$//')
+        # archive_output="${archive_basename}.psar"
+        # library_output="${archive_basename}.kit"
 
-        echo "Generating search archive: ${archive_output}" >&2
+        output_dir=$(mktemp -d archive_output_XXXXXX)
+
+        echo "Generating search archive: ${output_dir}" >&2
         spectronaut lg -se Pulsar \
-            -d "${data_dir}" \
+            -r "~{input_file}" \
             -fasta "~{fasta_1}" \
             ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
             ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-            -a "${archive_output}" \
-            -k "${library_output}" 2>&1 | tee archive_generation.log
+            -a "${output_dir}" \
+            -k "${output_dir}" 2>&1 | tee archive_generation.log
+            # ~{if defined(analysis_schema) then "-s " + analysis_schema else ""}
         # Output both search archive and spectral library 
 
-        archive_status=${PIPESTATUS[0]}
-        if [ "${archive_status}" -ne 0 ]; then
-            echo "ERROR: Search archive generation failed (exit ${archive_status})" >&2
-            rm -rf "${data_dir}"
-            exit "${archive_status}"
-        fi
+        # archive_status=${PIPESTATUS[0]}
+        # if [ "${archive_status}" -ne 0 ]; then
+        #     echo "ERROR: Search archive generation failed (exit ${archive_status})" >&2
+        #     rm -rf "${data_dir}"
+        #     exit "${archive_status}"
+        # fi
+        
+        find "${output_dir}" -type f -name "*.psar" -print -quit > search_archive.txt
 
-        # Verify archive was created
-        if [ ! -f "${archive_output}" ]; then
-            echo "ERROR: Search archive file not found: ${archive_output}" >&2
-            echo "Current directory contents:" >&2
-            ls -lh >&2
-            rm -rf "${data_dir}"
-            exit 1
-        fi
+        # # Verify archive was created
+        # if [ ! -f "${archive_output}" ]; then
+        #     echo "ERROR: Search archive file not found: ${archive_output}" >&2
+        #     echo "Current directory contents:" >&2
+        #     ls -lh >&2
+        #     rm -rf "${data_dir}"
+        #     exit 1
+        # fi
 
-        # Verify library was created
-        if [ ! -f "${library_output}" ]; then
-            echo "ERROR: Library file not found: ${library_output}" >&2
-            echo "Current directory contents:" >&2
-            ls -lh >&2
-            rm -rf "${data_dir}"
-            exit 1
-        fi
+        # # Verify library was created
+        # if [ ! -f "${library_output}" ]; then
+        #     echo "ERROR: Library file not found: ${library_output}" >&2
+        #     echo "Current directory contents:" >&2
+        #     ls -lh >&2
+        #     rm -rf "${data_dir}"
+        #     exit 1
+        # fi
 
         # # If above code fails to locate the generated archive and spectral library, use "find" to look deeper into subdirectories 
         # if [ ! -f "${archive_output}" ]; then
@@ -416,20 +403,17 @@ task archive_generation {
         #     cp "${found_archive}" "${archive_output}"
         # fi
 
-        echo "Search archive generated: ${archive_output}" >&2
-        ls -lh "${archive_output}" >&2
-        echo "Library generated: ${library_output}" >&2
-        ls -lh "${library_output}" >&2
+        # echo "Search archive generated: ${archive_output}" >&2
+        # ls -lh "${archive_output}" >&2
+        # echo "Library generated: ${library_output}" >&2
+        # ls -lh "${library_output}" >&2
 
-        # Cleanup
-        rm -rf "${data_dir}"
+        # # Cleanup
+        # rm -rf "${data_dir}"
     >>>
 
     output {
-        File search_archives = sub(basename(input_file), "\\.(htrms|raw|d|HTRMS|RAW|D)$", ""
-            ) + ".psar"
-        # File spectral_libraries = sub(basename(input_file), "\\.(htrms|raw|d|HTRMS|RAW|D)$", ""
-        #     ) + ".kit"
+        File search_archives = read_string("search_archive.txt")
     }
 
     runtime {
