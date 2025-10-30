@@ -5,7 +5,6 @@ workflow parallel_spectronaut {
         File fasta_1
         String file_directory
         String experiment_name
-        File? convert_schema
         File? fasta_2
         File? fasta_3
         File? analysis_schema
@@ -15,8 +14,6 @@ workflow parallel_spectronaut {
         File? report_schema_3
         File? report_schema_4
         File? json_settings
-        Boolean do_conversion = true
-        Boolean do_search = true
 
         # Compute resource configurations
         Int archive_generation_disk_gb = 2000
@@ -30,55 +27,48 @@ workflow parallel_spectronaut {
 
     Array[File] file_paths = read_lines(list_files.file_list)
 
-    if (do_conversion && do_search) {
-        scatter (file_path in file_paths) {
-            call htrms_conversion { input:
-                input_file_path = file_path,
-                convert_schema = convert_schema,
-            }
-
-            call archive_generation { input:
-                input_file = htrms_conversion.htrms_file,
-                fasta_1 = fasta_1,
-                fasta_2 = fasta_2,
-                fasta_3 = fasta_3,
-                enzyme_database = enzyme_database,
-                disk_gb = archive_generation_disk_gb,
-            }
-        }
-
-        call combine_archives { input:
-            input_archives = archive_generation.search_archive_psar,
-        }
-
-        scatter (htrms_file in htrms_conversion.htrms_file) {
-            call dia_analysis { input:
-                input_file = htrms_file, 
-                search_archive = combine_archives.merged_archive,
-                experiment_name = experiment_name,
-                analysis_schema = analysis_schema,
-                fasta_1 = fasta_1,
-                fasta_2 = fasta_2,
-                fasta_3 = fasta_3,
-                json_settings = json_settings,
-                
-                disk_gb = search_disk_size_gb
-            }
-        }
-
-        call combine_sne { input:
-            input_snes = dia_analysis.sne_file,
-            experiment_name = experiment_name,
+    scatter (file_path in file_paths) {
+        call archive_generation { input:
+            input_file = file_path,
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
             fasta_3 = fasta_3,
-            report_schema_1 = report_schema_1,
-            report_schema_2 = report_schema_2,
-            report_schema_3 = report_schema_3,
-            report_schema_4 = report_schema_4,
-            analysis_schema = analysis_schema,
-            disk_gb = sne_combine_disk_gb,
+            enzyme_database = enzyme_database,
+            disk_gb = archive_generation_disk_gb,
         }
+    }
+
+    call combine_archives { input:
+        input_archives = archive_generation.search_archive_psar,
+    }
+
+    scatter (file_path in file_paths) {
+        call dia_analysis { input:
+            input_file = file_path,
+            search_archive = combine_archives.merged_archive,
+            experiment_name = experiment_name,
+            analysis_schema = analysis_schema,
+            fasta_1 = fasta_1,
+            fasta_2 = fasta_2,
+            fasta_3 = fasta_3,
+            json_settings = json_settings,
+
+            disk_gb = search_disk_size_gb,
+        }
+    }
+
+    call combine_sne { input:
+        input_snes = dia_analysis.sne_file,
+        experiment_name = experiment_name,
+        fasta_1 = fasta_1,
+        fasta_2 = fasta_2,
+        fasta_3 = fasta_3,
+        report_schema_1 = report_schema_1,
+        report_schema_2 = report_schema_2,
+        report_schema_3 = report_schema_3,
+        report_schema_4 = report_schema_4,
+        analysis_schema = analysis_schema,
+        disk_gb = sne_combine_disk_gb,
     }
 }
 
@@ -355,7 +345,7 @@ task combine_archives {
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.0"
         cpu: 32
-        memory: "512GB" # Memory intensive - 896GB is the max allowed on N2D VMs
+        memory: "512GB"  # Memory intensive - 896GB is the max allowed on N2D VMs
         bootDiskSizeGb: 128
         disks: "local-disk 2000 SSD"
         preemptible: 0
@@ -364,11 +354,11 @@ task combine_archives {
 
 task dia_analysis {
     input {
-        File input_file 
+        File input_file
         File search_archive
+        File fasta_1
         String experiment_name
         File? analysis_schema
-        File fasta_1
         File? fasta_2
         File? fasta_3
         File? json_settings
@@ -446,7 +436,7 @@ task dia_analysis {
 
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.0"
-        cpu: 96 # CPU intensive 
+        cpu: 96  # CPU intensive
         memory: "256GB"
         bootDiskSizeGb: 128
         disks: "local-disk ~{disk_gb} SSD"
@@ -456,9 +446,9 @@ task dia_analysis {
 
 task combine_sne {
     input {
+        File fasta_1
         Array[File] input_snes
         String experiment_name
-        File fasta_1
         File? fasta_2
         File? fasta_3
         File? report_schema_1
@@ -544,7 +534,7 @@ task combine_sne {
     output {
         File spectronaut_output = "spectronaut_output.zip"
     }
-    
+
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.0"
         cpu: 32
