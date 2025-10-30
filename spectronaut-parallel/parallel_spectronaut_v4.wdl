@@ -29,7 +29,7 @@ workflow parallel_spectronaut {
 
     scatter (file_path in file_paths) {
         call archive_generation { input:
-            input_file = file_path,
+            input_file_path = file_path,
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
             fasta_3 = fasta_3,
@@ -110,84 +110,26 @@ task list_files {
     }
 }
 
-task htrms_conversion {
-    input {
-        String input_file_path
-        File? convert_schema
-    }
-
-    command <<<
-        set -euo pipefail
-
-        echo "=== HTRMS Conversion ====" >&2
-        echo "Input file: ~{input_file_path}" >&2
-
-        tmp_dir=$(mktemp -d tmp_input_XXXXXX)
-        output_dir=$(mktemp -d tmp_output_XXXXXX)
-
-        echo "Copying input file into workspace..." >&2
-        gcloud storage cp -r "~{input_file_path}" "${tmp_dir}/"
-
-        echo "Running HTRMS conversion..." >&2
-        spectronaut -convert \
-            -i "${tmp_dir}" \
-            -o "${output_dir}" \
-            ~{if defined(convert_schema) then "-s " + convert_schema else ""} 2>&1 | tee spectronaut_convert.log
-
-        # Find the converted HTRMS file
-        htrms_file=$(find "${output_dir}" -type f -name "*.htrms" -print -quit)
-
-        if [ -z "${htrms_file}" ]; then
-            echo "ERROR: No .htrms file found in output directory" >&2
-            exit 1
-        fi
-
-        echo "Found HTRMS file: ${htrms_file}" >&2
-
-        # Move to execution root with fixed filename for WDL output
-        mv "${htrms_file}" "converted.htrms"
-
-        echo "Moved to execution root: converted.htrms" >&2
-    >>>
-
-    output {
-        File htrms_file = "converted.htrms"
-    }
-
-    runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.0"
-        cpu: 16
-        memory: "32GB"
-        bootDiskSizeGb: 128
-        disks: "local-disk 1000 SSD"
-        preemptible: 0
-    }
-}
-
 task archive_generation {
     input {
-        File input_file
-        Int disk_gb
+        String input_file_path
         File? fasta_1
         File? fasta_2
         File? fasta_3
         File? enzyme_database
+        Int disk_gb
     }
 
     command <<<
         set -euo pipefail
 
         echo "=== Spectronaut Search Archive Generation ===" >&2
-        echo "Input file: ~{input_file}" >&2
+        echo "Input file: ~{input_file_path}" >&2
 
-        # Work directly in execution root to avoid file path issues
-        cromwell_root=$(pwd)
-        echo "Cromwell execution root: ${cromwell_root}" >&2
+        input_dir=$(mktemp -d input_XXXXXX)
+        output_dir=$(mktemp -d output_XXXXXX)
 
-        # Create output directory in execution root (not tmp)
-        output_dir="${cromwell_root}/archive_output"
-        mkdir -p "${output_dir}"
-        echo "Output directory: ${output_dir}" >&2
+        gcloud storage cp -r "~{input_file_path}" "${input_dir}/"
 
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..." >&2
@@ -195,17 +137,17 @@ task archive_generation {
         fi
 
         echo "Generating search archive..." >&2
-        echo "Command: spectronaut lg -se Pulsar -r ~{input_file} -fasta ~{fasta_1} -a ${output_dir} -k ${output_dir}" >&2
 
         spectronaut lg -se Pulsar \
-            -r "~{input_file}" \
+            -d "${input_dir}" \
             -fasta "~{fasta_1}" \
             ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
             ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            -a "${output_dir}" \
-            -k "${output_dir}" 2>&1 | tee archive_generation.log
+            -o "${output_dir}" 2>&1 | tee archive_generation.log
 
-        echo "Archive generation command completed. Checking for output files..." >&2
+        kit_file=$(find "${output_dir}" -type f -name "*.kit" -print -quit)
+
+        echo "Found search archive: ${kit_file}" >&2
 
         # Debug: List all files in output directory
         echo "Contents of output directory:" >&2
