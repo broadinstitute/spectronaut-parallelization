@@ -1,11 +1,16 @@
 version development
 
-# No XIC file export for ALL STEPS ####
+# Dynamic VM Binning with Size-based Disk Allocation
+# Files are distributed across n VMs using round-robin binning
+# Disk sizes are calculated dynamically based on actual input file sizes
+
 workflow parallel_spectronaut {
     input {
+        Int num_vms  # Number of VMs to use for parallel processing
+        Int disk_size_multiplier = 3  # Multiplier for disk size calculation (default: 3x)
+        Int conversion_disk_gb = 2000  # Fixed disk size for HTRMS conversion step
+
         File fasta_1
-        # Boolean do_conversion = "true"
-        # Boolean do_search = "true"
         String experiment_name
         String file_directory
         File? fasta_2
@@ -21,34 +26,26 @@ workflow parallel_spectronaut {
         File? report_schema_4
         File? json_settings
         String experiment_type = "proteome"  # proteome / ptm
-        Int max_parallel_vms = 40  # Maximum number of parallel VMs for scatter operations (capped at 40)
+        Int n_preemptible = 0
     }
-
-    # Fixed disk size configurations
-    Int archive_generation_disk_gb = 1000
-    Int search_disk_size_gb = 1000
 
     # Compute preset configurations based on experiment_type
-    # Edit these Maps to add new experiment types or adjust CPU/memory for existing types
-    # Format: Map[experiment_type -> value]
-    # All CPU and RAM configurations are pooled here for easier adjustments
-
     Map[String, Int] directDIA_search_cpu_presets = {
-        "proteome": 64,
-        "ptm": 96,
+        "proteome": 80,
+        "ptm": 128,
     }
     Map[String, Int] directDIA_search_ram_gb_presets = {
-        "proteome": 64,
-        "ptm": 96,
+        "proteome": 256,
+        "ptm": 512,
     }
 
     Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 16,
-        "ptm": 16,
+        "proteome": 8,
+        "ptm": 8,
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 128,
-        "ptm": 256,
+        "proteome": 256,
+        "ptm": 512
     }
 
     Map[String, Int] dia_analysis_cpu_presets = {
@@ -56,8 +53,8 @@ workflow parallel_spectronaut {
         "ptm": 64,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
-        "proteome": 32,
-        "ptm": 64,
+        "proteome": 96,
+        "ptm": 156,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
@@ -83,114 +80,113 @@ workflow parallel_spectronaut {
     Int combine_sne_ram_gb = combine_sne_ram_gb_presets[experiment_type]
 
     # List all files in the provided directory
-    call list_files { input:
-        gcs_path = file_directory,
+    call list_files {
+        input:
+            gcs_path = file_directory,
     }
 
     Array[String] file_paths = read_lines(list_files.file_list)
 
-    # Pre-evaluate optional inputs to avoid resolution issues in nested scatters
-    File? opt_fasta_2 = fasta_2
-    File? opt_fasta_3 = fasta_3
-    File? opt_enzyme_database = enzyme_database
-    File? opt_directDIA_schema = directDIA_schema
-    File? opt_DIA_analysis_schema = DIA_analysis_schema
-    File? opt_json_settings = json_settings
-
-    # Batching logic to limit parallel VMs
-    # Enforce maximum cap of 40 VMs regardless of user input
-    Int capped_max_vms = if max_parallel_vms > 40 then 40 else max_parallel_vms
-
-    # Create batches of file paths
-    call chunk_strings { input:
-        input_array = file_paths,
-        max_chunks = capped_max_vms,
+    # Create bins using round-robin distribution
+    call create_bins {
+        input:
+            file_paths = file_paths,
+            num_bins = num_vms,
     }
 
-    # Scatter over batches (max 40 VMs)
-    scatter (batch in chunk_strings.chunked_arrays) {
-        scatter (file_path in batch) {
-            call htrms_conversion { input:
-                input_file_path = file_path,
-                convert_schema = convert_schema,
-            }
+    Array[Array[String]] file_bins = read_json(create_bins.bins_json)
 
-            # directDIA search only to generate search archive
-            # Pulsar search command does not support HTRMS files
-            call directDIA_search { input:
-                input_file = htrms_conversion.htrms_file,
+    # Scatter over bins - each bin is processed in one VM
+    scatter (i in range(length(file_bins))) {
+        # HTRMS conversion for all files in the bin
+        call htrms_conversion_binned {
+            input:
+                input_file_paths = file_bins[i],
+                convert_schema = convert_schema,
+                conversion_disk_gb = conversion_disk_gb,
+        }
+
+        # DirectDIA search for all HTRMS files in the bin
+        call directDIA_search_binned {
+            input:
+                input_files = htrms_conversion_binned.htrms_files,
+                bin_size_gb = htrms_conversion_binned.total_size_gb,
+                disk_size_multiplier = disk_size_multiplier,
                 fasta_1 = fasta_1,
-                fasta_2 = opt_fasta_2,
-                fasta_3 = opt_fasta_3,
-                analysis_schema = opt_directDIA_schema,
-                enzyme_database = opt_enzyme_database,
+                fasta_2 = fasta_2,
+                fasta_3 = fasta_3,
+                analysis_schema = directDIA_schema,
+                enzyme_database = enzyme_database,
                 cpu = directDIA_search_cpu,
                 ram_gb = directDIA_search_ram_gb,
-                disk_gb = archive_generation_disk_gb,
-            }
+                n_preemptible = n_preemptible,
         }
     }
 
-    # Flatten nested scatter outputs
-    Array[File] all_search_archives = flatten(directDIA_search.search_archive)
-    Array[File] all_htrms_files = flatten(htrms_conversion.htrms_file)
+    # Flatten arrays for combine operations
+    Array[Array[File]] binned_htrms_files = htrms_conversion_binned.htrms_files
+    Array[Float] bin_sizes = htrms_conversion_binned.total_size_gb
+    Array[Array[File]] binned_archives = directDIA_search_binned.search_archives
+    Array[File] all_archives = flatten(binned_archives)
+
+    # Sum all bin sizes for combine_archives disk allocation
+    call sum_floats as sum_archive_sizes {
+        input:
+            values = bin_sizes,
+    }
 
     # Combine scattered search archives into one
-    call combine_archives { input:
-        input_archives = all_search_archives,
-
-        cpu = combine_archives_cpu,
-        ram_gb = combine_archives_ram_gb,
+    call combine_archives {
+        input:
+            input_archives = all_archives,
+            total_input_size_gb = sum_archive_sizes.total,
+            disk_size_multiplier = disk_size_multiplier,
+            cpu = combine_archives_cpu,
+            ram_gb = combine_archives_ram_gb,
     }
 
-    # Batching logic for DIA analysis scatter
-    call chunk_files { input:
-        input_array = all_htrms_files,
-        max_chunks = capped_max_vms,
-    }
-
-    # Search each file individually against the combined archive
-    # Scatter over batches (max 40 VMs)
-    scatter (htrms_batch in chunk_files.chunked_arrays) {
-        scatter (htrms_file in htrms_batch) {
-            call dia_analysis { input:
-                input_file = htrms_file,
+    # DIA analysis for each bin's HTRMS files
+    scatter (i in range(length(file_bins))) {
+        call dia_analysis_binned {
+            input:
+                input_files = binned_htrms_files[i],
+                bin_size_gb = bin_sizes[i],
+                disk_size_multiplier = disk_size_multiplier,
                 search_archive = combine_archives.merged_archive,
-                experiment_name = experiment_name,
-                analysis_schema = opt_DIA_analysis_schema,
                 fasta_1 = fasta_1,
-                fasta_2 = opt_fasta_2,
-                fasta_3 = opt_fasta_3,
-                json_settings = opt_json_settings,
-                disk_gb = search_disk_size_gb,
+                fasta_2 = fasta_2,
+                fasta_3 = fasta_3,
+                analysis_schema = DIA_analysis_schema,
+                json_settings = json_settings,
                 cpu = dia_analysis_cpu,
                 ram_gb = dia_analysis_ram_gb,
-            }
+                n_preemptible = n_preemptible,
         }
     }
 
-    # Flatten nested scatter output
-    Array[File] all_sne_files = flatten(dia_analysis.sne_file)
+    Array[File] all_sne = flatten(dia_analysis_binned.sne_files)
 
-    # Calculate total size of all SNE files for dynamic disk sizing at combine_sne step
-    call calculate_sne_total_size { input:
-        sne_files = all_sne_files,
+    # Sum all bin sizes for combine_sne disk allocation
+    call sum_floats as sum_sne_sizes {
+        input:
+            values = bin_sizes,
     }
 
     # Combine scattered SNE files and generate reports
-    call combine_sne { input:
-        sne_files = all_sne_files,
-        experiment_name = experiment_name,
-        condition_setup = condition_setup,
-        report_schema_1 = report_schema_1,
-        report_schema_2 = report_schema_2,
-        report_schema_3 = report_schema_3,
-        report_schema_4 = report_schema_4,
-        analysis_schema = DIA_analysis_schema,
-
-        ram_gb = combine_sne_ram_gb,
-        cpu = combine_sne_cpu,
-        disk_gb = calculate_sne_total_size.total_size_gb * 2,
+    call combine_sne {
+        input:
+            sne_files = all_sne,
+            experiment_name = experiment_name,
+            condition_setup = condition_setup,
+            report_schema_1 = report_schema_1,
+            report_schema_2 = report_schema_2,
+            report_schema_3 = report_schema_3,
+            report_schema_4 = report_schema_4,
+            analysis_schema = DIA_analysis_schema,
+            total_input_size_gb = sum_sne_sizes.total,
+            disk_size_multiplier = disk_size_multiplier,
+            ram_gb = combine_sne_ram_gb,
+            cpu = combine_sne_cpu,
     }
 }
 
@@ -205,12 +201,16 @@ task list_files {
         raw_listing="raw_listing.txt"
         cleaned_listing="file_list.txt"
 
+        # Normalize the input path (remove trailing slashes)
+        normalized_path=$(echo "~{gcs_path}" | sed 's:/*$::')
+
         gcloud storage ls "~{gcs_path}" > "${raw_listing}"
 
-        # Remove totals, trim trailing slashes and empty lines, unique
+        # Remove totals, trim trailing slashes, empty lines, filter out directory itself, unique
         grep -v 'TOTAL:' "${raw_listing}" | \
             sed 's:/*$::' | \
             sed '/^[[:space:]]*$/d' | \
+            grep -v "^${normalized_path}$" | \
             sort -u > "${cleaned_listing}"
     >>>
 
@@ -227,50 +227,157 @@ task list_files {
     }
 }
 
-task htrms_conversion {
+task create_bins {
     input {
-        String input_file_path
+        Array[String] file_paths
+        Int num_bins
+    }
+
+    command <<<
+        python3 <<CODE
+import json
+
+# Read file paths
+file_paths_file = "~{write_lines(file_paths)}"
+with open(file_paths_file) as f:
+    files = [line.strip() for line in f if line.strip()]
+
+num_bins = ~{num_bins}
+
+# Validate num_bins
+if num_bins < 1:
+    raise ValueError(f"num_bins must be at least 1, got {num_bins}")
+
+# Create bins using round-robin distribution
+bins = [[] for _ in range(num_bins)]
+for i, file_path in enumerate(files):
+    bin_index = i % num_bins
+    bins[bin_index].append(file_path)
+
+# Write bins to JSON
+with open("bins.json", "w") as f:
+    json.dump(bins, f, indent=2)
+
+# Print summary
+print(f"Total files: {len(files)}")
+print(f"Number of bins: {num_bins}")
+for i, bin_files in enumerate(bins):
+    print(f"Bin {i}: {len(bin_files)} files")
+CODE
+    >>>
+
+    output {
+        File bins_json = "bins.json"
+    }
+
+    runtime {
+        docker: "python:3.9-slim"
+        cpu: 2
+        memory: "4GB"
+        bootDiskSizeGb: 20
+        disks: "local-disk 20 HDD"
+    }
+}
+
+task sum_floats {
+    input {
+        Array[Float] values
+    }
+
+    command <<<
+        python3 <<CODE
+import json
+
+# Read values
+values_file = "~{write_json(values)}"
+with open(values_file) as f:
+    values = json.load(f)
+
+# Calculate sum
+total = sum(values)
+
+# Write total
+with open("total.txt", "w") as f:
+    f.write(str(total))
+
+print(f"Sum of {len(values)} values: {total}")
+CODE
+    >>>
+
+    output {
+        Float total = read_float("total.txt")
+    }
+
+    runtime {
+        docker: "python:3.9-slim"
+        cpu: 2
+        memory: "4GB"
+        bootDiskSizeGb: 20
+        disks: "local-disk 20 HDD"
+    }
+}
+
+task htrms_conversion_binned {
+    input {
+        Array[String] input_file_paths
         File? convert_schema
+        Int conversion_disk_gb
     }
 
     command <<<
         set -euo pipefail
 
         cromwell_root=$(pwd)
+
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
 
         output_dir="${cromwell_root}/out_conversion"
         mkdir -p "${output_dir}"
 
-        # Dedicated temp directory to prevent root fs pressure and avoid OOM kills
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        gcloud storage cp -r "~{input_file_path}" "${input_dir}/"
+        # Download all files in the bin
+        echo "Downloading files from GCS..."
+        while IFS= read -r file_path; do
+            if [ -n "${file_path}" ]; then
+                echo "Downloading: ${file_path}"
+                gcloud storage cp -r "${file_path}" "${input_dir}/"
+            fi
+        done < ~{write_lines(input_file_paths)}
 
+        # Calculate total size in GB after download
+        echo "Calculating total input size..."
+        total_size_bytes=$(du -sb "${input_dir}" | cut -f1)
+        total_size_gb=$(echo "scale=2; ${total_size_bytes} / (1024^3)" | bc)
+        echo "${total_size_gb}" > total_size_gb.txt
+        echo "Total input size: ${total_size_gb} GB"
+
+        # Convert all files to HTRMS
+        echo "Starting HTRMS conversion..."
         spectronaut -convert \
             -i "${input_dir}" \
             -o "${output_dir}" \
             ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
             -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
 
-        htrms_file=$(find "${output_dir}" -type f -name "*.htrms" -print -quit)
-
-        if [ -z "${htrms_file}" ]; then
-            echo "ERROR: No .htrms file produced" >&2
+        # Move all HTRMS files to output
+        echo "Moving HTRMS files..."
+        htrms_count=$(find "${output_dir}" -type f -name "*.htrms" | wc -l)
+        if [ "${htrms_count}" -eq 0 ]; then
+            echo "ERROR: No .htrms files produced" >&2
             exit 1
         fi
 
-        # Extract basename and replace extension with .htrms
-        input_basename=$(basename "~{input_file_path}")
-        output_filename="${input_basename%.*}.htrms"
+        find "${output_dir}" -type f -name "*.htrms" -exec mv {} "${cromwell_root}/" \;
 
-        mv "${htrms_file}" "${cromwell_root}/${output_filename}"
+        echo "Conversion complete. Generated ${htrms_count} HTRMS files."
     >>>
 
     output {
-        File htrms_file = "~{sub(basename(input_file_path), "\\.[^.]+$", "")}.htrms"
+        Array[File] htrms_files = glob("*.htrms")
+        Float total_size_gb = read_float("total_size_gb.txt")
     }
 
     runtime {
@@ -278,69 +385,93 @@ task htrms_conversion {
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 128
-        disks: "local-disk 500 HDD"
+        disks: "local-disk ~{conversion_disk_gb} HDD"
         preemptible: 0
     }
 }
 
-task directDIA_search {
+task directDIA_search_binned {
     input {
+        Array[File] input_files
+        Float bin_size_gb
+        Int disk_size_multiplier
         File fasta_1
-        File input_file
-        Int disk_gb
         Int cpu
         Int ram_gb
         File? analysis_schema
         File? fasta_2
         File? fasta_3
         File? enzyme_database
+        Int n_preemptible = 0
     }
 
     command <<<
         set -euo pipefail
 
         cromwell_root=$(pwd)
+
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
 
         output_dir="${cromwell_root}/out_archive"
         mkdir -p "${output_dir}"
 
-        # Dedicated temp directory to prevent root fs pressure and avoid OOM kills
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy localized File input to input directory
-        cp "~{input_file}" "${input_dir}/"
+        # Copy all HTRMS files to input directory
+        echo "Copying HTRMS files..."
+        while IFS= read -r htrms_file; do
+            if [ -n "${htrms_file}" ]; then
+                cp "${htrms_file}" "${input_dir}/"
+            fi
+        done < ~{write_lines(input_files)}
 
+        # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
+            echo "Importing enzyme database..."
             dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        spectronaut direct \
-            -d "${input_dir}" \
-            -fasta "~{fasta_1}" \
-            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
-            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-            -o "${output_dir}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee archive_generation.log
+        # Process each HTRMS file individually to generate search archives
+        echo "Starting directDIA search for archive generation..."
+        for htrms_file in "${input_dir}"/*.htrms; do
+            if [ -f "${htrms_file}" ]; then
+                basename_file=$(basename "${htrms_file}")
+                echo "Processing: ${basename_file}"
 
-        search_archive=$(find "${output_dir}" -type f -name "*.psar" -print -quit)
-        if [ -z "${search_archive}" ]; then
-            echo "ERROR: No .psar file produced" >&2
+                file_input_dir="${cromwell_root}/work_input_single"
+                mkdir -p "${file_input_dir}"
+                cp "${htrms_file}" "${file_input_dir}/"
+
+                spectronaut direct \
+                    -d "${file_input_dir}" \
+                    -fasta "~{fasta_1}" \
+                    ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+                    ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+                    ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+                    -o "${output_dir}" \
+                    -setTemp "${tmp_dir}" 2>&1 | tee -a archive_generation.log
+
+                rm -rf "${file_input_dir}"
+            fi
+        done
+
+        # Move all generated .psar files to output
+        echo "Moving search archives..."
+        psar_count=$(find "${output_dir}" -type f -name "*.psar" | wc -l)
+        if [ "${psar_count}" -eq 0 ]; then
+            echo "ERROR: No .psar files produced" >&2
             exit 1
         fi
 
-        # Extract basename and replace extension with .psar
-        input_basename=$(basename "~{input_file}")
-        output_filename="${input_basename%.*}.psar"
+        find "${output_dir}" -type f -name "*.psar" -exec mv {} "${cromwell_root}/" \;
 
-        mv "${search_archive}" "${cromwell_root}/${output_filename}"
+        echo "Archive generation complete. Generated ${psar_count} search archives."
     >>>
 
     output {
-        File search_archive = "~{sub(basename(input_file), "\\.[^.]+$", "")}.psar"
+        Array[File] search_archives = glob("*.psar")
     }
 
     runtime {
@@ -348,14 +479,16 @@ task directDIA_search {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{disk_gb} HDD"
-        preemptible: 0
+        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
+        preemptible: n_preemptible
     }
 }
 
 task combine_archives {
     input {
         Array[File] input_archives
+        Float total_input_size_gb
+        Int disk_size_multiplier
         Int cpu
         Int ram_gb
     }
@@ -369,11 +502,15 @@ task combine_archives {
         work_archives="${cromwell_root}/work_archives"
         mkdir -p "${work_archives}"
 
+        echo "Copying archives for merging..."
         while IFS= read -r archive; do
             if [ -n "${archive}" ]; then
                 cp "${archive}" "${work_archives}/"
             fi
         done < ~{write_lines(input_archives)}
+
+        archive_count=$(find "${work_archives}" -type f -name "*.psar" | wc -l)
+        echo "Merging ${archive_count} search archives..."
 
         spectronaut lg -se Pulsar \
             -sad "${work_archives}" \
@@ -384,6 +521,8 @@ task combine_archives {
             echo "ERROR: Merged archive file not found" >&2
             exit 1
         fi
+
+        echo "Archive merging complete."
     >>>
 
     output {
@@ -395,24 +534,25 @@ task combine_archives {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk 2000 HDD"
+        disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
         preemptible: 0
     }
 }
 
-task dia_analysis {
+task dia_analysis_binned {
     input {
-        File input_file
+        Array[File] input_files
         File search_archive
+        Float bin_size_gb
+        Int disk_size_multiplier
         File fasta_1
-        String experiment_name
         Int cpu
         Int ram_gb
         File? analysis_schema
         File? fasta_2
         File? fasta_3
         File? json_settings
-        Int disk_gb = 2000
+        Int n_preemptible = 0
     }
 
     command <<<
@@ -420,45 +560,55 @@ task dia_analysis {
 
         cromwell_root=$(pwd)
 
-        input_dir="${cromwell_root}/work_input"
-        mkdir -p "${input_dir}"
-
-        cp "~{input_file}" "${input_dir}/"
-
         output_dir="${cromwell_root}/out_dia"
         mkdir -p "${output_dir}"
 
         tmp_dir="${cromwell_root}/work_dia_temp"
         mkdir -p "${tmp_dir}"
 
-        # Generate a unique experiment name per raw file
-        input_basename=$(basename "~{input_file}")
-        file_basename="${input_basename%.*}"
-        # unique_experiment_name="~{experiment_name}_${file_basename}"
+        # Process each HTRMS file individually
+        echo "Starting DIA analysis..."
+        while IFS= read -r htrms_file; do
+            if [ -n "${htrms_file}" ] && [ -f "${htrms_file}" ]; then
+                basename_file=$(basename "${htrms_file}")
+                file_basename="${basename_file%.*}"
+                echo "Processing: ${basename_file}"
 
-        spectronaut diaanalysis \
-            ~{if defined(analysis_schema) then " -s " + analysis_schema else ""} \
-            ~{if defined(fasta_1) then " -fasta " + fasta_1 else ""} \
-            ~{if defined(fasta_2) then " -fasta " + fasta_2 else ""} \
-            ~{if defined(fasta_3) then " -fasta " + fasta_3 else ""} \
-            ~{if defined(json_settings) then " -j " + json_settings else ""} \
-            -n "${file_basename}" \
-            -o "${output_dir}" \
-            -d "${input_dir}" \
-            -a "~{search_archive}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee dia_analysis.log
+                input_dir="${cromwell_root}/work_input_${file_basename}"
+                mkdir -p "${input_dir}"
+                cp "${htrms_file}" "${input_dir}/"
 
-        sne_file=$(find "${output_dir}" -type f -name "*.sne" -print -quit)
-        if [ -z "${sne_file}" ]; then
-            echo "ERROR: No .sne file found" >&2
+                spectronaut diaanalysis \
+                    ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+                    -fasta "~{fasta_1}" \
+                    ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+                    ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+                    ~{if defined(json_settings) then "-j " + json_settings else ""} \
+                    -n "${file_basename}" \
+                    -o "${output_dir}" \
+                    -d "${input_dir}" \
+                    -a "~{search_archive}" \
+                    -setTemp "${tmp_dir}" 2>&1 | tee -a dia_analysis.log
+
+                rm -rf "${input_dir}"
+            fi
+        done < ~{write_lines(input_files)}
+
+        # Move all generated .sne files to output
+        echo "Moving SNE files..."
+        sne_count=$(find "${output_dir}" -type f -name "*.sne" | wc -l)
+        if [ "${sne_count}" -eq 0 ]; then
+            echo "ERROR: No .sne files found" >&2
             exit 1
         fi
 
-        mv "${sne_file}" "${cromwell_root}/${file_basename}.sne"
+        find "${output_dir}" -type f -name "*.sne" -exec mv {} "${cromwell_root}/" \;
+
+        echo "DIA analysis complete. Generated ${sne_count} SNE files."
     >>>
 
     output {
-        File sne_file = "~{sub(basename(input_file), "\\.[^.]+$", "")}.sne"
+        Array[File] sne_files = glob("*.sne")
     }
 
     runtime {
@@ -466,52 +616,8 @@ task dia_analysis {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{disk_gb} HDD"
-        preemptible: 0
-    }
-}
-
-task calculate_sne_total_size {
-    input {
-        Array[File] sne_files
-    }
-
-    command <<<
-        set -euo pipefail
-
-        total_bytes=0
-
-        # Fast batch processing: use stat in a single pass
-        while IFS= read -r sne_file; do
-            if [ -n "${sne_file}" ] && [ -f "${sne_file}" ]; then
-                file_size=$(stat -c%s "${sne_file}")
-                total_bytes=$((total_bytes + file_size))
-            fi
-        done < ~{write_lines(sne_files)}
-
-        # Convert bytes to GB and round up
-        # 1 GB = 1024^3 bytes = 1073741824 bytes
-        total_gb=$(( (total_bytes + 1073741823) / 1073741824 ))
-
-        # Ensure minimum of 1 GB
-        if [ "${total_gb}" -lt 1 ]; then
-            total_gb=1
-        fi
-
-        echo "${total_gb}" > total_size_gb.txt
-        echo "Total SNE files size: ${total_bytes} bytes (${total_gb} GB)" >&2
-    >>>
-
-    output {
-        Int total_size_gb = read_int("total_size_gb.txt")
-    }
-
-    runtime {
-        docker: "google/cloud-sdk:slim"
-        cpu: 2
-        memory: "8GB"
-        bootDiskSizeGb: 20
-        disks: "local-disk 30 HDD"
+        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
+        preemptible: n_preemptible
     }
 }
 
@@ -519,7 +625,8 @@ task combine_sne {
     input {
         Array[File] sne_files
         String experiment_name
-        Int disk_gb
+        Float total_input_size_gb
+        Int disk_size_multiplier
         Int ram_gb
         Int cpu
         File? condition_setup
@@ -538,11 +645,12 @@ task combine_sne {
         output_dir="${cromwell_root}/out_combine"
         output_zip="${cromwell_root}/spectronaut_output.zip"
 
-        mkdir -p "${output_dir}" 
+        mkdir -p "${output_dir}"
 
         sne_dir="${cromwell_root}/work_snes"
         mkdir -p "${sne_dir}"
 
+        echo "Copying SNE files for merging..."
         while IFS= read -r sne_file; do
             if [ -n "${sne_file}" ]; then
                 cp "${sne_file}" "${sne_dir}/"
@@ -555,24 +663,27 @@ task combine_sne {
             exit 1
         fi
 
-        # "spectronaut manageSNE --merge" merges SNE files on the experiment level, giving results equivalent to if the files were generated and run together 
+        echo "Merging ${sne_count} SNE files..."
         spectronaut manageSNE --merge \
             -n "~{experiment_name}_merged" \
             -o "${output_dir}" \
             -d "${sne_dir}" \
-            -con "~{condition_setup}" \
+            ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
             ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
             ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
             ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
             ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
             ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
 
+        echo "Creating output archive..."
         zip -r "${output_zip}" "${output_dir}" -x \*.zip
 
         if [ ! -f "${output_zip}" ]; then
             echo "ERROR: Failed to create output zip file" >&2
             exit 1
         fi
+
+        echo "SNE merging complete."
     >>>
 
     output {
@@ -584,93 +695,7 @@ task combine_sne {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{disk_gb} HDD"
+        disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
         preemptible: 0
-    }
-}
-
-task chunk_strings {
-    input {
-        Array[String] input_array
-        Int max_chunks
-    }
-
-    command <<<
-        python3 <<CODE
-        import json
-        import math
-
-        # Read input array from WDL-generated JSON file
-        with open('~{write_json(input_array)}', 'r') as f:
-            input_array = json.load(f)
-
-        max_chunks = ~{max_chunks}
-
-        total_items = len(input_array)
-        chunk_size = math.ceil(total_items / max_chunks)
-
-        chunks = []
-        for i in range(0, total_items, chunk_size):
-            chunks.append(input_array[i:i + chunk_size])
-
-        # Write chunks as JSON
-        with open('chunked_arrays.json', 'w') as f:
-            json.dump(chunks, f)
-        CODE
-    >>>
-
-    output {
-        Array[Array[String]] chunked_arrays = read_json("chunked_arrays.json")
-    }
-
-    runtime {
-        docker: "python:3.9-slim"
-        cpu: 2
-        memory: "4GB"
-        bootDiskSizeGb: 20
-        disks: "local-disk 20 HDD"
-    }
-}
-
-task chunk_files {
-    input {
-        Array[File] input_array
-        Int max_chunks
-    }
-
-    command <<<
-        python3 <<CODE
-        import json
-        import math
-
-        # Read input array from WDL-generated JSON file
-        with open('~{write_json(input_array)}', 'r') as f:
-            input_array = json.load(f)
-
-        max_chunks = ~{max_chunks}
-
-        total_items = len(input_array)
-        chunk_size = math.ceil(total_items / max_chunks)
-
-        chunks = []
-        for i in range(0, total_items, chunk_size):
-            chunks.append(input_array[i:i + chunk_size])
-
-        # Write chunks as JSON
-        with open('chunked_arrays.json', 'w') as f:
-            json.dump(chunks, f)
-        CODE
-    >>>
-
-    output {
-        Array[Array[File]] chunked_arrays = read_json("chunked_arrays.json")
-    }
-
-    runtime {
-        docker: "python:3.9-slim"
-        cpu: 2
-        memory: "4GB"
-        bootDiskSizeGb: 20
-        disks: "local-disk 20 HDD"
     }
 }
