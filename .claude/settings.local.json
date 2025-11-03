@@ -4,7 +4,8 @@
       "Bash(miniwdl check:*)",
       "WebFetch(domain:biognosys.com)",
       "Bash(dos2unix:*)",
-      "Bash(command -v miniwdl:*)"
+      "Bash(command -v miniwdl:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []
