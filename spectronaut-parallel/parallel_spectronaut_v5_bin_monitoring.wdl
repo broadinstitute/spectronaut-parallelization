@@ -7,7 +7,7 @@ version development
 workflow parallel_spectronaut {
     input {
         Int num_vms = 3  # Number of VMs to use for parallel processing
-        Int disk_size_multiplier = 15  # Multiplier for disk size calculation
+        Int disk_size_multiplier = 3  # Multiplier for disk size calculation (default: 3x)
         Int conversion_disk_gb = 2000  # Fixed disk size for HTRMS conversion step
 
         File fasta_1
@@ -214,6 +214,35 @@ task list_files {
             sed '/^[[:space:]]*$/d' | \
             grep -v "^${normalized_path}$" | \
             sort -u > "${cleaned_listing}"
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            # cgroup v2
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            # cgroup v1
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "${max_mem_bytes}" -gt 0 ]; then
+            max_mem_gb=$(awk "BEGIN {printf \"%.2f\", ${max_mem_bytes} / (1024^3)}")
+            echo "Maximum memory used: ${max_mem_gb} GB"
+            if [ "${limit_bytes}" -gt 0 ] && [ "${limit_bytes}" != "9223372036854771712" ]; then
+                limit_gb=$(awk "BEGIN {printf \"%.2f\", ${limit_bytes} / (1024^3)}")
+                percent=$(awk "BEGIN {printf \"%.1f\", (${max_mem_bytes} * 100) / ${limit_bytes}}")
+                echo "Memory limit: ${limit_gb} GB"
+                echo "Memory usage: ${percent}%"
+            fi
+        else
+            echo "Memory usage information not available"
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -266,6 +295,35 @@ print(f"Number of bins: {num_bins}")
 for i, bin_files in enumerate(bins):
     print(f"Bin {i}: {len(bin_files)} files")
 CODE
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            # cgroup v2
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            # cgroup v1
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "${max_mem_bytes}" -gt 0 ]; then
+            max_mem_gb=$(awk "BEGIN {printf \"%.2f\", ${max_mem_bytes} / (1024^3)}")
+            echo "Maximum memory used: ${max_mem_gb} GB"
+            if [ "${limit_bytes}" -gt 0 ] && [ "${limit_bytes}" != "9223372036854771712" ]; then
+                limit_gb=$(awk "BEGIN {printf \"%.2f\", ${limit_bytes} / (1024^3)}")
+                percent=$(awk "BEGIN {printf \"%.1f\", (${max_mem_bytes} * 100) / ${limit_bytes}}")
+                echo "Memory limit: ${limit_gb} GB"
+                echo "Memory usage: ${percent}%"
+            fi
+        else
+            echo "Memory usage information not available"
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -304,6 +362,35 @@ with open("total.txt", "w") as f:
 
 print(f"Sum of {len(values)} values: {total}")
 CODE
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            # cgroup v2
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            # cgroup v1
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "${max_mem_bytes}" -gt 0 ]; then
+            max_mem_gb=$(awk "BEGIN {printf \"%.2f\", ${max_mem_bytes} / (1024^3)}")
+            echo "Maximum memory used: ${max_mem_gb} GB"
+            if [ "${limit_bytes}" -gt 0 ] && [ "${limit_bytes}" != "9223372036854771712" ]; then
+                limit_gb=$(awk "BEGIN {printf \"%.2f\", ${limit_bytes} / (1024^3)}")
+                percent=$(awk "BEGIN {printf \"%.1f\", (${max_mem_bytes} * 100) / ${limit_bytes}}")
+                echo "Memory limit: ${limit_gb} GB"
+                echo "Memory usage: ${percent}%"
+            fi
+        else
+            echo "Memory usage information not available"
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -375,6 +462,35 @@ task htrms_conversion_binned {
         total_size_gb=$(awk "BEGIN {printf \"%.2f\", ${total_size_bytes} / (1024^3)}")
         echo "${total_size_gb}" > "${cromwell_root}/total_size_gb.txt"
         echo "Total HTRMS file size: ${total_size_gb} GB"
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            # cgroup v2
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            # cgroup v1
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "${max_mem_bytes}" -gt 0 ]; then
+            max_mem_gb=$(awk "BEGIN {printf \"%.2f\", ${max_mem_bytes} / (1024^3)}")
+            echo "Maximum memory used: ${max_mem_gb} GB"
+            if [ "${limit_bytes}" -gt 0 ] && [ "${limit_bytes}" != "9223372036854771712" ]; then
+                limit_gb=$(awk "BEGIN {printf \"%.2f\", ${limit_bytes} / (1024^3)}")
+                percent=$(awk "BEGIN {printf \"%.1f\", (${max_mem_bytes} * 100) / ${limit_bytes}}")
+                echo "Memory limit: ${limit_gb} GB"
+                echo "Memory usage: ${percent}%"
+            fi
+        else
+            echo "Memory usage information not available"
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -435,6 +551,11 @@ task directDIA_search_binned {
             dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
+        # Process all HTRMS files at once to generate search archives
+        echo "Starting directDIA search for archive generation..."
+        htrms_count=$(find "${input_dir}" -type f -name "*.htrms" | wc -l)
+        echo "Processing ${htrms_count} HTRMS files in batch..."
+
         spectronaut direct \
             -d "${input_dir}" \
             -fasta "~{fasta_1}" \
@@ -455,6 +576,35 @@ task directDIA_search_binned {
         find "${output_dir}" -type f -name "*.psar" -exec mv {} "${cromwell_root}/" \;
 
         echo "Archive generation complete. Generated ${psar_count} search archives."
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            # cgroup v2
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            # cgroup v1
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "${max_mem_bytes}" -gt 0 ]; then
+            max_mem_gb=$(awk "BEGIN {printf \"%.2f\", ${max_mem_bytes} / (1024^3)}")
+            echo "Maximum memory used: ${max_mem_gb} GB"
+            if [ "${limit_bytes}" -gt 0 ] && [ "${limit_bytes}" != "9223372036854771712" ]; then
+                limit_gb=$(awk "BEGIN {printf \"%.2f\", ${limit_bytes} / (1024^3)}")
+                percent=$(awk "BEGIN {printf \"%.1f\", (${max_mem_bytes} * 100) / ${limit_bytes}}")
+                echo "Memory limit: ${limit_gb} GB"
+                echo "Memory usage: ${percent}%"
+            fi
+        else
+            echo "Memory usage information not available"
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -466,7 +616,7 @@ task directDIA_search_binned {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} SSD"
+        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
     }
 }
@@ -496,6 +646,9 @@ task combine_archives {
             fi
         done < ~{write_lines(input_archives)}
 
+        archive_count=$(find "${work_archives}" -type f -name "*.psar" | wc -l)
+        echo "Merging ${archive_count} search archives..."
+
         spectronaut lg -se Pulsar \
             -sad "${work_archives}" \
             -k "${cromwell_root}/${merged_library}" \
@@ -507,6 +660,35 @@ task combine_archives {
         fi
 
         echo "Archive merging complete."
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            # cgroup v2
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            # cgroup v1
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "${max_mem_bytes}" -gt 0 ]; then
+            max_mem_gb=$(awk "BEGIN {printf \"%.2f\", ${max_mem_bytes} / (1024^3)}")
+            echo "Maximum memory used: ${max_mem_gb} GB"
+            if [ "${limit_bytes}" -gt 0 ] && [ "${limit_bytes}" != "9223372036854771712" ]; then
+                limit_gb=$(awk "BEGIN {printf \"%.2f\", ${limit_bytes} / (1024^3)}")
+                percent=$(awk "BEGIN {printf \"%.1f\", (${max_mem_bytes} * 100) / ${limit_bytes}}")
+                echo "Memory limit: ${limit_gb} GB"
+                echo "Memory usage: ${percent}%"
+            fi
+        else
+            echo "Memory usage information not available"
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -534,7 +716,6 @@ task dia_analysis_binned {
         Int ram_gb
         Int bin_index
         String experiment_name
-        File? enzyme_database
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -564,11 +745,10 @@ task dia_analysis_binned {
             fi
         done < ~{write_lines(input_files)}
 
-                # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
+        # Process all HTRMS files at once
+        echo "Starting DIA analysis..."
+        htrms_count=$(find "${input_dir}" -type f -name "*.htrms" | wc -l)
+        echo "Processing ${htrms_count} HTRMS files in batch for bin ~{bin_index}..."
 
         spectronaut diaanalysis \
             ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
@@ -593,6 +773,35 @@ task dia_analysis_binned {
         find "${output_dir}" -type f -name "*.sne" -exec mv {} "${cromwell_root}/" \;
 
         echo "DIA analysis complete. Generated ${sne_count} SNE files."
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            # cgroup v2
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            # cgroup v1
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "${max_mem_bytes}" -gt 0 ]; then
+            max_mem_gb=$(awk "BEGIN {printf \"%.2f\", ${max_mem_bytes} / (1024^3)}")
+            echo "Maximum memory used: ${max_mem_gb} GB"
+            if [ "${limit_bytes}" -gt 0 ] && [ "${limit_bytes}" != "9223372036854771712" ]; then
+                limit_gb=$(awk "BEGIN {printf \"%.2f\", ${limit_bytes} / (1024^3)}")
+                percent=$(awk "BEGIN {printf \"%.1f\", (${max_mem_bytes} * 100) / ${limit_bytes}}")
+                echo "Memory limit: ${limit_gb} GB"
+                echo "Memory usage: ${percent}%"
+            fi
+        else
+            echo "Memory usage information not available"
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -644,7 +853,14 @@ task combine_sne {
                 cp "${sne_file}" "${sne_dir}/"
             fi
         done < ~{write_lines(sne_files)}
-        
+
+        sne_count=$(find "${sne_dir}" -type f -name "*.sne" | wc -l)
+        if [ "${sne_count}" -eq 0 ]; then
+            echo "ERROR: No SNE files found" >&2
+            exit 1
+        fi
+
+        echo "Merging ${sne_count} SNE files..."
         spectronaut manageSNE --merge \
             -n "~{experiment_name}_merged" \
             -o "${output_dir}" \
@@ -665,6 +881,35 @@ task combine_sne {
         fi
 
         echo "SNE merging complete."
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            # cgroup v2
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 0)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            # cgroup v1
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "${max_mem_bytes}" -gt 0 ]; then
+            max_mem_gb=$(awk "BEGIN {printf \"%.2f\", ${max_mem_bytes} / (1024^3)}")
+            echo "Maximum memory used: ${max_mem_gb} GB"
+            if [ "${limit_bytes}" -gt 0 ] && [ "${limit_bytes}" != "9223372036854771712" ]; then
+                limit_gb=$(awk "BEGIN {printf \"%.2f\", ${limit_bytes} / (1024^3)}")
+                percent=$(awk "BEGIN {printf \"%.1f\", (${max_mem_bytes} * 100) / ${limit_bytes}}")
+                echo "Memory limit: ${limit_gb} GB"
+                echo "Memory usage: ${percent}%"
+            fi
+        else
+            echo "Memory usage information not available"
+        fi
+        echo "==========================="
     >>>
 
     output {
