@@ -25,7 +25,7 @@ This workflow parallelizes Spectronaut searches by processing each input file in
 - **Optimized disk types**: Uses SSD for archive generation (high IOPS) and HDD for other steps (cost-effective bulk storage)
 - **Scalable architecture**: Linearly scales with dataset size—100 files process in the same wall-clock time as 10 files (resource limits permitting)
 
-## Workflow Overview
+## Workflow Overvie
 
 The workflow executes in seven distinct phases:
 
