@@ -13,8 +13,8 @@ workflow parallel_spectronaut {
         File? enzyme_database
 
         File? convert_schema
-        File? directDIA_schema  # For search archive generation
-        File? DIA_analysis_schema  # For the actual DIA search against combined search archive
+        File? directDIA_settings  # For search archive generation
+        File? DIA_analysis_settings  # For the actual DIA search against combined search archive
 
         File? condition_setup
         File? report_schema_1
@@ -111,7 +111,7 @@ workflow parallel_spectronaut {
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
             fasta_3 = fasta_3,
-            analysis_schema = directDIA_schema,
+            analysis_schema = directDIA_settings,
             enzyme_database = enzyme_database,
 
             cpu = directDIA_search_cpu,
@@ -146,7 +146,7 @@ workflow parallel_spectronaut {
         call dia_analysis { input:
             input_file = htrms_file,
             search_archive = combine_archives.merged_archive,
-            analysis_schema = DIA_analysis_schema,
+            analysis_schema = DIA_analysis_settings,
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
             fasta_3 = fasta_3,
@@ -169,7 +169,7 @@ workflow parallel_spectronaut {
         report_schema_2 = report_schema_2,
         report_schema_3 = report_schema_3,
         report_schema_4 = report_schema_4,
-        analysis_schema = DIA_analysis_schema,
+        analysis_schema = DIA_analysis_settings,
         enzyme_database = enzyme_database,
 
         ram_gb = combine_sne_ram_gb,
