@@ -3,35 +3,41 @@ version development
 # No XIC file export for ALL STEPS ####
 workflow parallel_spectronaut {
     input {
-        File fasta_1
         # Boolean do_conversion = "true"
-        # Boolean do_search = "true"
+        String experiment_type = "proteome"  # proteome / ptm
         String experiment_name
         String file_directory
+        File fasta_1
         File? fasta_2
         File? fasta_3
         File? enzyme_database
+
         File? convert_schema
         File? directDIA_schema  # For search archive generation
         File? DIA_analysis_schema  # For the actual DIA search against combined search archive
+
         File? condition_setup
         File? report_schema_1
         File? report_schema_2
         File? report_schema_3
         File? report_schema_4
+
         File? json_settings
-        String experiment_type = "proteome"  # proteome / ptm
         Int n_preemptible = 0
     }
 
     # Fixed disk size configurations
     Int archive_generation_disk_gb = 1000
     Int search_disk_size_gb = 1000
-    Int combine_sne_disk_gb = 1000
 
     # Compute preset configurations based on experiment_type
     # Edit these Maps to add new experiment types or adjust CPU/memory for existing types
     # Format: Map[experiment_type -> value]
+    
+    Map[String, Int] disk_size_multiplier_presets = {
+        "proteome": 15,
+        "ptm": 20,
+    }
 
     Map[String, Int] directDIA_search_cpu_presets = {
         "proteome": 80,
@@ -43,12 +49,12 @@ workflow parallel_spectronaut {
     }
 
     Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 8,
-        "ptm": 8,
+        "proteome": 16,
+        "ptm": 16,
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 256,
-        "ptm": 512
+        "proteome": 384,
+        "ptm": 640
     }
 
     Map[String, Int] dia_analysis_cpu_presets = {
@@ -56,8 +62,8 @@ workflow parallel_spectronaut {
         "ptm": 64,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
-        "proteome": 96,
-        "ptm": 156,
+        "proteome": 128,
+        "ptm": 256,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
@@ -65,11 +71,13 @@ workflow parallel_spectronaut {
         "ptm": 16,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 256,
-        "ptm": 512,
+        "proteome": 384,
+        "ptm": 640,
     }
 
     # Look up values based on experiment_type
+    Int disk_size_multiplier = disk_size_multiplier_presets[experiment_type]
+
     Int directDIA_search_cpu = directDIA_search_cpu_presets[experiment_type]
     Int directDIA_search_ram_gb = directDIA_search_ram_gb_presets[experiment_type]
 
@@ -109,16 +117,28 @@ workflow parallel_spectronaut {
             cpu = directDIA_search_cpu,
             ram_gb = directDIA_search_ram_gb,
             disk_gb = archive_generation_disk_gb,
-            n_preemptible = n_preemptible, 
+            n_preemptible = n_preemptible,
         }
     }
+
+    # Calculate total size of HTRMS files for dynamic disk sizing
+    call calculate_files_size { input:
+        files = htrms_conversion.htrms_file,
+    }
+
+    # Calculate dynamic disk sizes based on total HTRMS size and experiment type multiplier
+    Int total_htrms_size_gb = calculate_files_size.total_size_gb
+    Int combine_archives_disk_gb = ceil(total_htrms_size_gb * disk_size_multiplier)
+    Int combine_sne_dynamic_disk_gb = ceil(total_htrms_size_gb * disk_size_multiplier)
 
     # Combine scattered search archives into one
     call combine_archives { input:
         input_archives = directDIA_search.search_archive,
+        enzyme_database = enzyme_database,
 
         cpu = combine_archives_cpu,
         ram_gb = combine_archives_ram_gb,
+        disk_gb = combine_archives_disk_gb,
     }
 
     # Search each file individually against the combined archive
@@ -136,6 +156,7 @@ workflow parallel_spectronaut {
             cpu = dia_analysis_cpu,
             ram_gb = dia_analysis_ram_gb,
             n_preemptible = n_preemptible,
+            enzyme_database = enzyme_database,
         }
     }
 
@@ -149,10 +170,11 @@ workflow parallel_spectronaut {
         report_schema_3 = report_schema_3,
         report_schema_4 = report_schema_4,
         analysis_schema = DIA_analysis_schema,
+        enzyme_database = enzyme_database,
 
         ram_gb = combine_sne_ram_gb,
         cpu = combine_sne_cpu,
-        disk_gb = combine_sne_disk_gb,
+        disk_gb = combine_sne_dynamic_disk_gb,
     }
 }
 
@@ -317,7 +339,7 @@ task directDIA_search {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{disk_gb} HDD"
+        disks: "local-disk ~{disk_gb} SSD"
         preemptible: n_preemptible
     }
 }
@@ -327,6 +349,8 @@ task combine_archives {
         Array[File] input_archives
         Int cpu
         Int ram_gb
+        Int disk_gb
+        File? enzyme_database
     }
 
     command <<<
@@ -343,6 +367,10 @@ task combine_archives {
                 cp "${archive}" "${work_archives}/"
             fi
         done < ~{write_lines(input_archives)}
+
+        if [ ~{defined(enzyme_database)} = true ]; then
+            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
+        fi
 
         spectronaut lg -se Pulsar \
             -sad "${work_archives}" \
@@ -364,7 +392,7 @@ task combine_archives {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk 2000 HDD"
+        disks: "local-disk ~{disk_gb} HDD"
         preemptible: 0
     }
 }
@@ -376,6 +404,7 @@ task dia_analysis {
         File fasta_1
         Int cpu
         Int ram_gb
+        File? enzyme_database
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -399,6 +428,10 @@ task dia_analysis {
 
         tmp_dir="${cromwell_root}/work_dia_temp"
         mkdir -p "${tmp_dir}"
+
+        if [ ~{defined(enzyme_database)} = true ]; then
+            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
+        fi
 
         spectronaut diaanalysis \
             ~{if defined(analysis_schema) then " -s " + analysis_schema else ""} \
@@ -452,6 +485,7 @@ task combine_sne {
         File? report_schema_3
         File? report_schema_4
         File? analysis_schema
+        File? enzyme_database
     }
 
     command <<<
@@ -462,7 +496,7 @@ task combine_sne {
         output_dir="${cromwell_root}/out_combine"
         output_zip="${cromwell_root}/spectronaut_output.zip"
 
-        mkdir -p "${output_dir}" 
+        mkdir -p "${output_dir}"
 
         sne_dir="${cromwell_root}/work_snes"
         mkdir -p "${sne_dir}"
@@ -479,7 +513,11 @@ task combine_sne {
             exit 1
         fi
 
-        # "spectronaut manageSNE --merge" merges SNE files on the experiment level, giving results equivalent to if the files were generated and run together 
+        if [ ~{defined(enzyme_database)} = true ]; then
+            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
+        fi
+
+        # "spectronaut manageSNE --merge" merges SNE files on the experiment level, giving results equivalent to if the files were generated and run together
         spectronaut manageSNE --merge \
             -n "~{experiment_name}_merged" \
             -o "${output_dir}" \
@@ -509,6 +547,43 @@ task combine_sne {
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
         disks: "local-disk ~{disk_gb} HDD"
+        preemptible: 0
+    }
+}
+
+task calculate_files_size {
+    input {
+        Array[File] files
+    }
+
+    command <<<
+        set -euo pipefail
+
+        # Calculate total size of all files in bytes
+        total_bytes=0
+        while IFS= read -r file; do
+            if [ -n "${file}" ]; then
+                file_size=$(stat -c%s "${file}")
+                total_bytes=$((total_bytes + file_size))
+            fi
+        done < ~{write_lines(files)}
+
+        # Convert bytes to GB (rounded up)
+        total_gb=$(( (total_bytes + 1073741823) / 1073741824 ))
+
+        echo "${total_gb}" > total_size_gb.txt
+    >>>
+
+    output {
+        Int total_size_gb = read_int("total_size_gb.txt")
+    }
+
+    runtime {
+        docker: "ubuntu:20.04"
+        cpu: 2
+        memory: "8GB"
+        bootDiskSizeGb: 20
+        disks: "local-disk 300 HDD"
         preemptible: 0
     }
 }
