@@ -6,7 +6,10 @@
       "Bash(dos2unix:*)",
       "Bash(command -v miniwdl:*)",
       "WebSearch",
-      "Bash(command -v:*)"
+      "Bash(command -v:*)",
+      "WebFetch(domain:cromwell.readthedocs.io)",
+      "WebFetch(domain:support.terra.bio)",
+      "WebFetch(domain:docs.cloud.google.com)"
     ],
     "deny": [],
     "ask": []
