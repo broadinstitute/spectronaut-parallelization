@@ -1,24 +1,24 @@
 version development
 
-# Dynamic VM Binning with Size-based Disk Allocation
-# Files are distributed across n VMs using round-robin binning
-# Disk sizes are calculated dynamically based on actual input file sizes
+# DIA Analysis Module
+# Performs HTRMS conversion and DIA analysis against a pre-built library
+# Distributes work across multiple VMs using binning
 
-workflow parallel_spectronaut {
+workflow parallel_spectronaut_diaAnalysis {
     input {
         Int num_vms = 3  # Number of VMs to use for parallel processing
         Int disk_size_multiplier = 15  # Multiplier for disk size calculation
         Int conversion_disk_gb = 2000  # Fixed disk size for HTRMS conversion step
 
+        File search_library  # Pre-built search library (.kit file)
         File fasta_1
         String experiment_name
-        String file_directory
+        String raw_file_directory  # GCS directory containing raw files
         File? fasta_2
         File? fasta_3
         File? enzyme_database
         File? convert_schema
-        File? directDIA_settings  # For search archive generation
-        File? DIA_analysis_settings  # For the actual DIA search against combined search archive
+        File? DIA_analysis_settings
         File? condition_setup
         File? report_schema_1
         File? report_schema_2
@@ -30,24 +30,6 @@ workflow parallel_spectronaut {
     }
 
     # Compute preset configurations based on experiment_type
-    Map[String, Int] directDIA_search_cpu_presets = {
-        "proteome": 80,
-        "ptm": 128,
-    }
-    Map[String, Int] directDIA_search_ram_gb_presets = {
-        "proteome": 256,
-        "ptm": 512,
-    }
-
-    Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 16,
-        "ptm": 16,
-    }
-    Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 384,
-        "ptm": 640
-    }
-
     Map[String, Int] dia_analysis_cpu_presets = {
         "proteome": 32,
         "ptm": 64,
@@ -67,22 +49,16 @@ workflow parallel_spectronaut {
     }
 
     # Look up values based on experiment_type
-    Int directDIA_search_cpu = directDIA_search_cpu_presets[experiment_type]
-    Int directDIA_search_ram_gb = directDIA_search_ram_gb_presets[experiment_type]
-
-    Int combine_archives_cpu = combine_archives_cpu_presets[experiment_type]
-    Int combine_archives_ram_gb = combine_archives_ram_gb_presets[experiment_type]
-
     Int dia_analysis_cpu = dia_analysis_cpu_presets[experiment_type]
     Int dia_analysis_ram_gb = dia_analysis_ram_gb_presets[experiment_type]
 
     Int combine_sne_cpu = combine_sne_cpu_presets[experiment_type]
     Int combine_sne_ram_gb = combine_sne_ram_gb_presets[experiment_type]
 
-    # List all files in the provided directory
+    # List all raw files in the provided directory
     call list_files {
         input:
-            gcs_path = file_directory,
+            gcs_path = raw_file_directory,
     }
 
     Array[String] file_paths = read_lines(list_files.file_list)
@@ -106,58 +82,19 @@ workflow parallel_spectronaut {
                 conversion_disk_gb = conversion_disk_gb,
         }
 
-        # DirectDIA search for all HTRMS files in the bin
-        call directDIA_search_binned {
+        # DIA analysis for all HTRMS files in the bin using the provided library
+        call dia_analysis_binned {
             input:
                 input_files = htrms_conversion_binned.htrms_files,
                 bin_size_gb = htrms_conversion_binned.total_size_gb,
                 disk_size_multiplier = disk_size_multiplier,
-                fasta_1 = fasta_1,
-                fasta_2 = fasta_2,
-                fasta_3 = fasta_3,
-                analysis_schema = directDIA_settings,
-                enzyme_database = enzyme_database,
-                cpu = directDIA_search_cpu,
-                ram_gb = directDIA_search_ram_gb,
-                n_preemptible = n_preemptible,
-        }
-    }
-
-    # Flatten arrays for combine operations
-    Array[Array[File]] binned_htrms_files = htrms_conversion_binned.htrms_files
-    Array[Float] bin_sizes = htrms_conversion_binned.total_size_gb
-    Array[Array[File]] binned_archives = directDIA_search_binned.search_archives
-    Array[File] all_archives = flatten(binned_archives)
-
-    # Sum all bin sizes for combine_archives disk allocation
-    call sum_floats as sum_archive_sizes {
-        input:
-            values = bin_sizes,
-    }
-
-    # Combine scattered search archives into one
-    call combine_archives {
-        input:
-            input_archives = all_archives,
-            total_input_size_gb = sum_archive_sizes.total,
-            disk_size_multiplier = disk_size_multiplier,
-            cpu = combine_archives_cpu,
-            ram_gb = combine_archives_ram_gb,
-    }
-
-    # DIA analysis for each bin's HTRMS files
-    scatter (i in range(length(file_bins))) {
-        call dia_analysis_binned {
-            input:
-                input_files = binned_htrms_files[i],
-                bin_size_gb = bin_sizes[i],
-                disk_size_multiplier = disk_size_multiplier,
-                search_archive = combine_archives.merged_archive,
+                search_archive = search_library,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
                 analysis_schema = DIA_analysis_settings,
                 json_settings = json_settings,
+                enzyme_database = enzyme_database,
                 cpu = dia_analysis_cpu,
                 ram_gb = dia_analysis_ram_gb,
                 bin_index = i,
@@ -166,6 +103,8 @@ workflow parallel_spectronaut {
         }
     }
 
+    # Flatten arrays for combine operations
+    Array[Float] bin_sizes = htrms_conversion_binned.total_size_gb
     Array[File] all_sne = flatten(dia_analysis_binned.sne_files)
 
     # Sum all bin sizes for combine_sne disk allocation
@@ -189,6 +128,10 @@ workflow parallel_spectronaut {
             disk_size_multiplier = disk_size_multiplier,
             ram_gb = combine_sne_ram_gb,
             cpu = combine_sne_cpu,
+    }
+
+    output {
+        File spectronaut_output = combine_sne.spectronaut_output
     }
 }
 
@@ -392,137 +335,6 @@ task htrms_conversion_binned {
     }
 }
 
-task directDIA_search_binned {
-    input {
-        Array[File] input_files
-        Float bin_size_gb
-        Int disk_size_multiplier
-        File fasta_1
-        Int cpu
-        Int ram_gb
-        File? analysis_schema
-        File? fasta_2
-        File? fasta_3
-        File? enzyme_database
-        Int n_preemptible = 0
-    }
-
-    command <<<
-        set -euo pipefail
-
-        cromwell_root=$(pwd)
-
-        input_dir="${cromwell_root}/work_input"
-        mkdir -p "${input_dir}"
-
-        output_dir="${cromwell_root}/out_archive"
-        mkdir -p "${output_dir}"
-
-        tmp_dir="${cromwell_root}/sn_temp"
-        mkdir -p "${tmp_dir}"
-
-        # Copy all HTRMS files to input directory
-        echo "Copying HTRMS files..."
-        while IFS= read -r htrms_file; do
-            if [ -n "${htrms_file}" ]; then
-                cp "${htrms_file}" "${input_dir}/"
-            fi
-        done < ~{write_lines(input_files)}
-
-        # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
-
-        spectronaut direct \
-            -d "${input_dir}" \
-            -fasta "~{fasta_1}" \
-            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
-            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-            -o "${output_dir}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee archive_generation.log
-
-        # Move all generated .psar files to output
-        echo "Moving search archives..."
-        psar_count=$(find "${output_dir}" -type f -name "*.psar" | wc -l)
-        if [ "${psar_count}" -eq 0 ]; then
-            echo "ERROR: No .psar files produced" >&2
-            exit 1
-        fi
-
-        find "${output_dir}" -type f -name "*.psar" -exec mv {} "${cromwell_root}/" \;
-
-        echo "Archive generation complete. Generated ${psar_count} search archives."
-    >>>
-
-    output {
-        Array[File] search_archives = glob("*.psar")
-    }
-
-    runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.0"
-        cpu: cpu
-        memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} SSD"
-        preemptible: n_preemptible
-    }
-}
-
-task combine_archives {
-    input {
-        Array[File] input_archives
-        Float total_input_size_gb
-        Int disk_size_multiplier
-        Int cpu
-        Int ram_gb
-    }
-
-    command <<<
-        set -euo pipefail
-
-        cromwell_root=$(pwd)
-        merged_library="merged_library.kit"
-
-        work_archives="${cromwell_root}/work_archives"
-        mkdir -p "${work_archives}"
-
-        echo "Copying archives for merging..."
-        while IFS= read -r archive; do
-            if [ -n "${archive}" ]; then
-                cp "${archive}" "${work_archives}/"
-            fi
-        done < ~{write_lines(input_archives)}
-
-        spectronaut lg -se Pulsar \
-            -sad "${work_archives}" \
-            -k "${cromwell_root}/${merged_library}" \
-            -o "${cromwell_root}" 2>&1 | tee merge_archives.log
-
-        if [ ! -f "${cromwell_root}/${merged_library}" ]; then
-            echo "ERROR: Merged archive file not found" >&2
-            exit 1
-        fi
-
-        echo "Archive merging complete."
-    >>>
-
-    output {
-        File merged_archive = "merged_library.kit"
-    }
-
-    runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.0"
-        cpu: cpu
-        memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
-        preemptible: 0
-    }
-}
-
 task dia_analysis_binned {
     input {
         Array[File] input_files
@@ -564,7 +376,7 @@ task dia_analysis_binned {
             fi
         done < ~{write_lines(input_files)}
 
-                # Import enzyme database if provided
+        # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..."
             dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
@@ -644,7 +456,7 @@ task combine_sne {
                 cp "${sne_file}" "${sne_dir}/"
             fi
         done < ~{write_lines(sne_files)}
-        
+
         spectronaut manageSNE --merge \
             -n "~{experiment_name}_merged" \
             -o "${output_dir}" \
