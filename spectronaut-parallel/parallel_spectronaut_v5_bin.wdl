@@ -6,13 +6,13 @@ version development
 
 workflow parallel_spectronaut {
     input {
-        Int num_vms = 3  # Number of VMs to use for parallel processing
-        Int disk_size_multiplier = 15  # Multiplier for disk size calculation
-        Int conversion_disk_gb = 2000  # Fixed disk size for HTRMS conversion step
+        Int num_vms  # Number of VMs to use for parallel processing
+        Int disk_size_multiplier = 5  # Multiplier for disk size calculation
+        Boolean do_conversion = true  # If true, convert raw files to HTRMS; if false, use raw files directly
 
-        File fasta_1
         String experiment_name
         String file_directory
+        File fasta_1
         File? fasta_2
         File? fasta_3
         File? enzyme_database
@@ -24,9 +24,16 @@ workflow parallel_spectronaut {
         File? report_schema_2
         File? report_schema_3
         File? report_schema_4
+        
         File? json_settings
         String experiment_type = "proteome"  # proteome / ptm
-        Int n_preemptible = 0
+
+        # Task-specific preemptible settings
+        Int n_preemptible_htrms_conversion = 0
+        Int n_preemptible_directDIA_search = 0
+        Int n_preemptible_combine_archives = 0
+        Int n_preemptible_dia_analysis = 0
+        Int n_preemptible_combine_sne = 0
     }
 
     # Compute preset configurations based on experiment_type
@@ -79,8 +86,13 @@ workflow parallel_spectronaut {
     Int combine_sne_cpu = combine_sne_cpu_presets[experiment_type]
     Int combine_sne_ram_gb = combine_sne_ram_gb_presets[experiment_type]
 
-    # List all files in the provided directory
+    # List all files in the provided directory and get total size
     call list_files {
+        input:
+            gcs_path = file_directory,
+    }
+
+    call get_directory_size {
         input:
             gcs_path = file_directory,
     }
@@ -96,36 +108,56 @@ workflow parallel_spectronaut {
 
     Array[Array[String]] file_bins = read_json(create_bins.bins_json)
 
+    # Calculate per-bin size for disk allocation (assumes equal distribution)
+    Float per_bin_size_gb = get_directory_size.total_size_gb / num_vms
+
     # Scatter over bins - each bin is processed in one VM
     scatter (i in range(length(file_bins))) {
-        # HTRMS conversion for all files in the bin
-        call htrms_conversion_binned {
+        # Step 1: Always download files and calculate size
+        # The size calculated is used to dynamically set disk size for HTRMS conversion
+        call download_and_size_binned {
             input:
                 input_file_paths = file_bins[i],
-                convert_schema = convert_schema,
-                conversion_disk_gb = conversion_disk_gb,
         }
 
-        # DirectDIA search for all HTRMS files in the bin
+        # Step 2: Conditionally convert to HTRMS if do_conversion=true
+        if (do_conversion) {
+            call htrms_conversion_binned {
+                input:
+                    input_files = download_and_size_binned.downloaded_files,
+                    raw_size_gb = per_bin_size_gb,
+                    convert_schema = convert_schema,
+                    n_preemptible = n_preemptible_htrms_conversion,
+            }
+        }
+
+        # Step 3: Select files and sizes based on whether conversion happened
+        # Search HTRMS-converted files if do_conversion=true; otherwise, search raw input files
+        Array[File] search_input_files = select_first([htrms_conversion_binned.htrms_files, download_and_size_binned.downloaded_files])
+        # Use size of HTRMS-converted files if available; otherwise, use upfront per-bin size
+        Float search_size_gb = select_first([htrms_conversion_binned.total_size_gb, per_bin_size_gb])
+
+        # Step 4: DirectDIA search for search archive generation *only*
+        # Uses directDIA search instead of Pulsar search ("spectronaut lg -se Pulsar") because the latter only supports vendor's raw file format, which is more expensive
         call directDIA_search_binned {
             input:
-                input_files = htrms_conversion_binned.htrms_files,
-                bin_size_gb = htrms_conversion_binned.total_size_gb,
-                disk_size_multiplier = disk_size_multiplier,
+                input_files = search_input_files,
+                analysis_schema = directDIA_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
-                analysis_schema = directDIA_settings,
                 enzyme_database = enzyme_database,
                 cpu = directDIA_search_cpu,
                 ram_gb = directDIA_search_ram_gb,
-                n_preemptible = n_preemptible,
+                n_preemptible = n_preemptible_directDIA_search,
+                bin_size_gb = search_size_gb,
+                disk_size_multiplier = disk_size_multiplier,
         }
     }
 
     # Flatten arrays for combine operations
-    Array[Array[File]] binned_htrms_files = htrms_conversion_binned.htrms_files
-    Array[Float] bin_sizes = htrms_conversion_binned.total_size_gb
+    Array[Array[File]] binned_search_files = search_input_files
+    Array[Float] bin_sizes = search_size_gb
     Array[Array[File]] binned_archives = directDIA_search_binned.search_archives
     Array[File] all_archives = flatten(binned_archives)
 
@@ -143,26 +175,27 @@ workflow parallel_spectronaut {
             disk_size_multiplier = disk_size_multiplier,
             cpu = combine_archives_cpu,
             ram_gb = combine_archives_ram_gb,
+            n_preemptible = n_preemptible_combine_archives,
     }
 
-    # DIA analysis for each bin's HTRMS files
+    # DIA analysis for each bin's files (HTRMS if converted, raw if not) against the merged library (.kit)
     scatter (i in range(length(file_bins))) {
         call dia_analysis_binned {
             input:
-                input_files = binned_htrms_files[i],
-                bin_size_gb = bin_sizes[i],
-                disk_size_multiplier = disk_size_multiplier,
+                experiment_name = experiment_name,
+                input_files = binned_search_files[i],
                 search_archive = combine_archives.merged_archive,
+                analysis_schema = DIA_analysis_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
-                analysis_schema = DIA_analysis_settings,
                 json_settings = json_settings,
                 cpu = dia_analysis_cpu,
                 ram_gb = dia_analysis_ram_gb,
                 bin_index = i,
-                experiment_name = experiment_name,
-                n_preemptible = n_preemptible,
+                bin_size_gb = bin_sizes[i],
+                disk_size_multiplier = disk_size_multiplier,
+                n_preemptible = n_preemptible_dia_analysis,
         }
     }
 
@@ -177,18 +210,19 @@ workflow parallel_spectronaut {
     # Combine scattered SNE files and generate reports
     call combine_sne {
         input:
-            sne_files = all_sne,
             experiment_name = experiment_name,
+            sne_files = all_sne,
+            analysis_schema = DIA_analysis_settings,
             condition_setup = condition_setup,
             report_schema_1 = report_schema_1,
             report_schema_2 = report_schema_2,
             report_schema_3 = report_schema_3,
             report_schema_4 = report_schema_4,
-            analysis_schema = DIA_analysis_settings,
+            cpu = combine_sne_cpu,
+            ram_gb = combine_sne_ram_gb,
             total_input_size_gb = sum_sne_sizes.total,
             disk_size_multiplier = disk_size_multiplier,
-            ram_gb = combine_sne_ram_gb,
-            cpu = combine_sne_cpu,
+            n_preemptible = n_preemptible_combine_sne,
     }
 }
 
@@ -218,6 +252,41 @@ task list_files {
 
     output {
         File file_list = "file_list.txt"
+    }
+
+    runtime {
+        docker: "google/cloud-sdk:slim"
+        cpu: 2
+        memory: "8GB"
+        bootDiskSizeGb: 20
+        disks: "local-disk 300 HDD"
+    }
+}
+
+task get_directory_size {
+    input {
+        String gcs_path
+    }
+
+    command <<<
+        set -euo pipefail
+
+        # Get total size of directory in bytes using gcloud storage du
+        echo "Calculating total size of: ~{gcs_path}"
+
+        # gcloud storage du -s outputs: SIZE  PATH
+        # Extract just the size (first column)
+        total_bytes=$(gcloud storage du -s "~{gcs_path}" | awk '{print $1}')
+
+        # Convert bytes to GB
+        total_gb=$(awk "BEGIN {printf \"%.2f\", ${total_bytes} / (1024^3)}")
+
+        echo "${total_gb}" > total_size_gb.txt
+        echo "Total directory size: ${total_gb} GB"
+    >>>
+
+    output {
+        Float total_size_gb = read_float("total_size_gb.txt")
     }
 
     runtime {
@@ -319,11 +388,69 @@ CODE
     }
 }
 
-task htrms_conversion_binned {
+task download_and_size_binned {
     input {
         Array[String] input_file_paths
+    }
+
+    command <<<
+        set -euo pipefail
+
+        cromwell_root=$(pwd)
+
+        input_dir="${cromwell_root}/work_input"
+        mkdir -p "${input_dir}"
+
+        # Download all files in the bin
+        echo "Downloading files from GCS..."
+        while IFS= read -r file_path; do
+            if [ -n "${file_path}" ]; then
+                echo "Downloading: ${file_path}"
+                gcloud storage cp -r "${file_path}" "${input_dir}/"
+            fi
+        done < ~{write_lines(input_file_paths)}
+
+        # Move all files to output
+        echo "Moving files to output..."
+        file_count=$(find "${input_dir}" -type f | wc -l)
+        if [ "${file_count}" -eq 0 ]; then
+            echo "ERROR: No files downloaded" >&2
+            exit 1
+        fi
+
+        find "${input_dir}" -type f -exec mv {} "${cromwell_root}/" \;
+
+        echo "Download complete. Downloaded ${file_count} files."
+
+        # Calculate total size in GB
+        echo "Calculating total file size..."
+        total_size_bytes=$(find "${cromwell_root}" -type f ! -name "*.txt" -exec du -b {} + | awk '{sum += $1} END {print sum}')
+        total_size_gb=$(awk "BEGIN {printf \"%.2f\", ${total_size_bytes} / (1024^3)}")
+        echo "${total_size_gb}" > "${cromwell_root}/total_size_gb.txt"
+        echo "Total file size: ${total_size_gb} GB"
+    >>>
+
+    output {
+        Array[File] downloaded_files = glob("*")
+        Float total_size_gb = read_float("total_size_gb.txt")
+    }
+
+    runtime {
+        docker: "google/cloud-sdk:slim"
+        cpu: 16
+        memory: "32GB"
+        bootDiskSizeGb: 128
+        disks: "local-disk 2000 HDD"
+        preemptible: 0
+    }
+}
+
+task htrms_conversion_binned {
+    input {
+        Array[File] input_files
+        Float raw_size_gb
         File? convert_schema
-        Int conversion_disk_gb
+        Int n_preemptible = 0
     }
 
     command <<<
@@ -340,14 +467,13 @@ task htrms_conversion_binned {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Download all files in the bin
-        echo "Downloading files from GCS..."
-        while IFS= read -r file_path; do
-            if [ -n "${file_path}" ]; then
-                echo "Downloading: ${file_path}"
-                gcloud storage cp -r "${file_path}" "${input_dir}/"
+        # Copy all input files to input directory
+        echo "Copying input files..."
+        while IFS= read -r input_file; do
+            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
+                cp "${input_file}" "${input_dir}/"
             fi
-        done < ~{write_lines(input_file_paths)}
+        done < ~{write_lines(input_files)}
 
         # Convert all files to HTRMS
         echo "Starting HTRMS conversion..."
@@ -375,6 +501,34 @@ task htrms_conversion_binned {
         total_size_gb=$(awk "BEGIN {printf \"%.2f\", ${total_size_bytes} / (1024^3)}")
         echo "${total_size_gb}" > "${cromwell_root}/total_size_gb.txt"
         echo "Total HTRMS file size: ${total_size_gb} GB"
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "$max_mem_bytes" -gt 0 ]; then
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            echo "Actual Peak RAM: ${max_mem_gb} GB"
+            
+            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                echo "RAM Limit: ${limit_gb} GB"
+                echo "RAM Usage: ${usage_percent}%"
+            fi
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -383,12 +537,12 @@ task htrms_conversion_binned {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.0"
+        docker: "cameronlian/panoply-spectronaut:v20.2"
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{conversion_disk_gb} HDD"
-        preemptible: 0
+        disks: "local-disk ~{ceil(raw_size_gb * 3)} SSD"
+        preemptible: n_preemptible
     }
 }
 
@@ -455,6 +609,34 @@ task directDIA_search_binned {
         find "${output_dir}" -type f -name "*.psar" -exec mv {} "${cromwell_root}/" \;
 
         echo "Archive generation complete. Generated ${psar_count} search archives."
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "$max_mem_bytes" -gt 0 ]; then
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            echo "Actual Peak RAM: ${max_mem_gb} GB"
+            
+            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                echo "RAM Limit: ${limit_gb} GB"
+                echo "RAM Usage: ${usage_percent}%"
+            fi
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -462,7 +644,7 @@ task directDIA_search_binned {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.0"
+        docker: "cameronlian/panoply-spectronaut:v20.2"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
@@ -478,6 +660,7 @@ task combine_archives {
         Int disk_size_multiplier
         Int cpu
         Int ram_gb
+        Int n_preemptible = 0
     }
 
     command <<<
@@ -507,6 +690,34 @@ task combine_archives {
         fi
 
         echo "Archive merging complete."
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "$max_mem_bytes" -gt 0 ]; then
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            echo "Actual Peak RAM: ${max_mem_gb} GB"
+            
+            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                echo "RAM Limit: ${limit_gb} GB"
+                echo "RAM Usage: ${usage_percent}%"
+            fi
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -514,12 +725,12 @@ task combine_archives {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.0"
+        docker: "cameronlian/panoply-spectronaut:v20.2"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
         disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
-        preemptible: 0
+        preemptible: n_preemptible
     }
 }
 
@@ -593,6 +804,34 @@ task dia_analysis_binned {
         find "${output_dir}" -type f -name "*.sne" -exec mv {} "${cromwell_root}/" \;
 
         echo "DIA analysis complete. Generated ${sne_count} SNE files."
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "$max_mem_bytes" -gt 0 ]; then
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            echo "Actual Peak RAM: ${max_mem_gb} GB"
+            
+            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                echo "RAM Limit: ${limit_gb} GB"
+                echo "RAM Usage: ${usage_percent}%"
+            fi
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -600,11 +839,11 @@ task dia_analysis_binned {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.0"
+        docker: "cameronlian/panoply-spectronaut:v20.2"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
+        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} SSD"
         preemptible: n_preemptible
     }
 }
@@ -623,6 +862,7 @@ task combine_sne {
         File? report_schema_3
         File? report_schema_4
         File? analysis_schema
+        Int n_preemptible = 0
     }
 
     command <<<
@@ -665,6 +905,34 @@ task combine_sne {
         fi
 
         echo "SNE merging complete."
+
+        # Memory usage reporting
+        echo "=== Memory Usage Report ==="
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "$max_mem_bytes" -gt 0 ]; then
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            echo "Actual Peak RAM: ${max_mem_gb} GB"
+            
+            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                echo "RAM Limit: ${limit_gb} GB"
+                echo "RAM Usage: ${usage_percent}%"
+            fi
+        fi
+        echo "==========================="
     >>>
 
     output {
@@ -672,11 +940,11 @@ task combine_sne {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.0"
+        docker: "cameronlian/panoply-spectronaut:v20.2"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
         disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
-        preemptible: 0
+        preemptible: n_preemptible
     }
 }
