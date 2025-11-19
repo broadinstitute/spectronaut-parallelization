@@ -29,6 +29,12 @@ This repository contains WDL (Workflow Description Language) workflows for runni
    - Generates reports from existing SNE files
    - Uses `spectronaut manageSNE` command
 
+5. **spectronaut-parallel/parallel_spectronaut_v5_bin.wdl** - Dynamic VM binning workflow
+   - Distributes files across n VMs using round-robin binning
+   - Calculates disk sizes dynamically based on actual input file sizes
+   - Uses WDL `development` version
+   - Docker image: `cameronlian/panoply-spectronaut:v20.2`
+
 ### Workflow Execution Flow
 
 For the main HTRMS conversion workflow (HTRMSConversion_support/Spectronaut_v20-0.wdl):
@@ -57,6 +63,75 @@ For the main HTRMS conversion workflow (HTRMSConversion_support/Spectronaut_v20-
 **Docker Images:**
 - v19.7: `broadcptacdev/panoply_spectronaut:v19.7`
 - v20.0: `broadcptacdev/panoply_spectronaut:v20.0` (current)
+- v20.2: `cameronlian/panoply-spectronaut:v20.2` (spectronaut-parallel)
+
+### Spectronaut Parallel Workflow Details
+
+**Workflow Inputs:**
+
+Required inputs:
+- `num_vms`: Number of VMs for parallel processing
+- `experiment_name`: Name for the experiment
+- `file_directory`: GCS path to input files
+- `fasta_1`: Primary FASTA database file
+
+Optional inputs:
+- `fasta_2`, `fasta_3`: Additional FASTA database files
+- `disk_size_multiplier`: Multiplier for disk size calculation (default: 3)
+- `do_conversion`: Convert raw files to HTRMS (default: true)
+- `enzyme_database`: Custom enzyme database file
+- `convert_schema`: Schema for HTRMS conversion
+- `directDIA_settings`: Settings for search archive generation
+- `DIA_analysis_settings`: Settings for DIA analysis against merged library
+- `condition_setup`: Condition setup file
+- `report_schema_1` through `report_schema_4`: Report schema files
+- `json_settings`: JSON settings file
+- `experiment_type`: "proteome" or "ptm" (default: "proteome")
+
+Preemptible settings (all default to 0):
+- `n_preemptible_htrms_conversion`
+- `n_preemptible_directDIA_search`
+- `n_preemptible_combine_archives`
+- `n_preemptible_dia_analysis`
+- `n_preemptible_combine_sne`
+
+**Resource Presets by experiment_type:**
+
+| Task | proteome CPU | proteome RAM | ptm CPU | ptm RAM |
+|------|--------------|--------------|---------|---------|
+| directDIA_search | 80 | 256 GB | 128 | 512 GB |
+| combine_archives | 16 | 384 GB | 16 | 640 GB |
+| dia_analysis | 32 | 128 GB | 64 | 256 GB |
+| combine_sne | 16 | 384 GB | 16 | 640 GB |
+
+**Parallel Workflow Execution Flow:**
+
+1. **list_files**: Lists all files in GCS directory
+2. **create_bins**: Distributes files across VMs using round-robin algorithm
+3. **First scatter** (per bin):
+   - `download_and_size_binned`: Downloads files from GCS, calculates total size for dynamic disk allocation
+   - `htrms_conversion_binned` (if do_conversion=true): Converts raw files to HTRMS format
+   - `directDIA_search_binned`: Generates search archives (.psar)
+4. **combine_archives**: Merges all .psar files into merged_library.kit
+5. **Second scatter** (per bin):
+   - `dia_analysis_binned`: Runs DIA analysis against merged library, produces .sne files
+6. **combine_sne**: Merges all SNE files and generates reports (output: spectronaut_output.zip)
+
+**Key Tasks and Docker Images:**
+
+| Task | Docker Image | Function |
+|------|--------------|----------|
+| list_files | google/cloud-sdk:slim | Lists files in GCS path |
+| create_bins | python:3.9-slim | Python script for round-robin distribution |
+| download_and_size_binned | google/cloud-sdk:slim | Downloads files, calculates size |
+| htrms_conversion_binned | cameronlian/panoply-spectronaut:v20.2 | Converts raw to HTRMS |
+| directDIA_search_binned | cameronlian/panoply-spectronaut:v20.2 | Generates search archives |
+| combine_archives | cameronlian/panoply-spectronaut:v20.2 | Merges archives into .kit library |
+| dia_analysis_binned | cameronlian/panoply-spectronaut:v20.2 | DIA analysis against merged library |
+| combine_sne | cameronlian/panoply-spectronaut:v20.2 | Merges SNE files, generates reports |
+
+**Dynamic Disk Sizing:**
+Disk sizes are calculated as `ceil(input_size_gb * disk_size_multiplier)`. The `download_and_size_binned` task measures actual file sizes, which propagate to downstream tasks for appropriate disk allocation.
 
 ## Spectronaut Command Patterns
 
@@ -102,6 +177,50 @@ spectronaut manageSNE \
   -o <output_dir> \
   -rs <report_schema_01> \
   [-rs <report_schema_02>] # Can specify up to 5 schemas
+```
+
+### Spectronaut Parallel Workflow Commands
+
+DirectDIA search archive generation:
+```bash
+spectronaut direct \
+  -d <input_folder> \
+  -fasta <fasta_file> \
+  [-s <analysis_settings>] \
+  -o <output_dir> \
+  -setTemp <temp_dir>
+```
+
+Archive merging:
+```bash
+spectronaut lg -se Pulsar \
+  -sad <archives_directory> \
+  -k <output_kit_file> \
+  -o <output_dir>
+```
+
+DIA analysis:
+```bash
+spectronaut diaanalysis \
+  [-s <analysis_settings>] \
+  -fasta <fasta_file> \
+  [-j <json_settings>] \
+  -n <experiment_name> \
+  -o <output_dir> \
+  -d <data_folder> \
+  -a <search_archive> \
+  -setTemp <temp_dir>
+```
+
+SNE merging:
+```bash
+spectronaut manageSNE --merge \
+  -n <experiment_name> \
+  -o <output_dir> \
+  -d <sne_directory> \
+  [-con <condition_setup>] \
+  [-s <analysis_settings>] \
+  [-rs <report_schema>]
 ```
 
 ## Runtime Configurations
