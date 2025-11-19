@@ -18,7 +18,7 @@ RUN set -ex \
           python3-pip \
      && rm -rf /var/lib/apt/lists/*
 
-COPY src/Spectronaut_20.3.251119.92449.deb /packages/Spectronaut_20.3.251119.92449.deb
+COPY src/spectronaut-installers/Spectronaut_20.3.251119.92449.deb /packages/Spectronaut_20.3.251119.92449.deb
 RUN dpkg -i /packages/Spectronaut_20.3.251119.92449.deb
 
 RUN spectronaut activate 16994635-6f54-429c-8c4a-a2cf00781603
