@@ -537,7 +537,7 @@ task htrms_conversion_binned {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.2"
+        docker: "cameronlian/panoply-spectronaut:v20.3"
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 128
@@ -644,7 +644,7 @@ task directDIA_search_binned {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.2"
+        docker: "cameronlian/panoply-spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
@@ -725,7 +725,7 @@ task combine_archives {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.2"
+        docker: "cameronlian/panoply-spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
@@ -839,7 +839,7 @@ task dia_analysis_binned {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.2"
+        docker: "cameronlian/panoply-spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
@@ -940,7 +940,7 @@ task combine_sne {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.2"
+        docker: "cameronlian/panoply-spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
