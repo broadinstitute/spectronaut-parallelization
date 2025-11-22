@@ -1,5 +1,7 @@
 version development
 
+# Major fix of a fatal error in "parallel_spectronaut_v5_bin.wdl" - duplicated names for search archives across shards
+
 # Dynamic VM Binning with Size-based Disk Allocation
 # Files are distributed across n VMs using round-robin binning
 # Disk sizes are calculated dynamically based on actual input file sizes
@@ -149,6 +151,7 @@ workflow parallel_spectronaut {
             n_preemptible = n_preemptible_directDIA_search,
             bin_size_gb = search_size_gb,
             disk_size_multiplier = disk_size_multiplier,
+            bin_index = i,
         }
     }
 
@@ -533,7 +536,7 @@ task htrms_conversion_binned {
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(raw_size_gb * 5)} SSD"
+        disks: "local-disk ~{ceil(raw_size_gb * 5)} HDD"
         preemptible: n_preemptible
     }
 }
@@ -546,6 +549,7 @@ task directDIA_search_binned {
         Int disk_size_multiplier
         Int cpu
         Int ram_gb
+        Int bin_index
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -591,15 +595,19 @@ task directDIA_search_binned {
             -o "${output_dir}" \
             -setTemp "${tmp_dir}" 2>&1 | tee archive_generation.log
 
-        # Move all generated .psar files to output
-        echo "Moving search archives..."
+        # Rename and move .psar files with unique bin_index suffix
+        echo "Renaming and moving search archives..."
         psar_count=$(find "${output_dir}" -type f -name "*.psar" | wc -l)
         if [ "${psar_count}" -eq 0 ]; then
             echo "ERROR: No .psar files produced" >&2
             exit 1
         fi
 
-        find "${output_dir}" -type f -name "*.psar" -exec mv {} "${cromwell_root}/" \;
+        find "${output_dir}" -type f -name "*.psar" | while read -r psar_file; do
+            basename=$(basename "${psar_file}" .psar)
+            new_name="${basename}_bin_~{bin_index}.psar"
+            mv "${psar_file}" "${cromwell_root}/${new_name}"
+        done
 
         echo "Archive generation complete. Generated ${psar_count} search archives."
 
@@ -641,7 +649,7 @@ task directDIA_search_binned {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} SSD"
+        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
     }
 }
@@ -837,7 +845,7 @@ task dia_analysis_binned {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} SSD"
+        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
     }
 }
