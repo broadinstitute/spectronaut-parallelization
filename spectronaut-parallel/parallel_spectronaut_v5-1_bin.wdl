@@ -157,10 +157,12 @@ workflow parallel_spectronaut {
 
     if (actual_num_vms > 1) {
         # PHASE 5: Create bins for parallel processing
-        File converted_files_list = write_lines(all_converted_files)
+        call write_array_to_file { input:
+            files = all_converted_files,
+        }
 
         call create_bins_from_file { input:
-            file_paths_file = converted_files_list,
+            file_paths_file = write_array_to_file.output_file,
             num_bins = actual_num_vms,
         }
 
@@ -781,6 +783,32 @@ task sum_floats {
         memory: "8GB"
         bootDiskSizeGb: 20
         disks: "local-disk 200 HDD"
+        preemptible: 2
+    }
+}
+
+task write_array_to_file {
+    input {
+        Array[File] files
+    }
+
+    command <<<
+        # Write file paths to output file
+        while IFS= read -r file_path; do
+            echo "${file_path}"
+        done < ~{write_lines(files)} > file_paths.txt
+    >>>
+
+    output {
+        File output_file = "file_paths.txt"
+    }
+
+    runtime {
+        docker: "google/cloud-sdk:slim"
+        cpu: 2
+        memory: "4GB"
+        bootDiskSizeGb: 10
+        disks: "local-disk 50 HDD"
         preemptible: 2
     }
 }
