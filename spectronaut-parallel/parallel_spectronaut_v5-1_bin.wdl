@@ -23,8 +23,8 @@ workflow parallel_spectronaut {
         File? report_schema_3
         File? report_schema_4
         File? json_settings
-        String experiment_type = "proteome"  # proteome / ptm
         Boolean do_conversion = true  # If true, convert raw files to HTRMS; if false, use raw files directly
+        String experiment_type = "proteome"  # proteome / ptm
         Int disk_size_multiplier = 5  # Multiplier for disk size calculation
 
         # Task-specific preemptible settings
@@ -41,8 +41,8 @@ workflow parallel_spectronaut {
         "ptm": 128,
     }
     Map[String, Int] directDIA_search_ram_gb_presets = {
-        "proteome": 256,
-        "ptm": 512,
+        "proteome": 150,
+        "ptm": 250,
     }
 
     Map[String, Int] combine_archives_cpu_presets = {
@@ -50,8 +50,8 @@ workflow parallel_spectronaut {
         "ptm": 16,
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 384,
-        "ptm": 640,
+        "proteome": 50,
+        "ptm": 100,
     }
 
     Map[String, Int] dia_analysis_cpu_presets = {
@@ -59,8 +59,8 @@ workflow parallel_spectronaut {
         "ptm": 64,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
-        "proteome": 128,
-        "ptm": 256,
+        "proteome": 80,
+        "ptm": 150,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
@@ -68,8 +68,8 @@ workflow parallel_spectronaut {
         "ptm": 16,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 384,
-        "ptm": 640,
+        "proteome": 40,
+        "ptm": 80,
     }
 
     # Look up values based on experiment_type
@@ -113,6 +113,7 @@ workflow parallel_spectronaut {
         # The size calculated is used to dynamically set disk size for HTRMS conversion
         call download_and_size_binned { input:
             input_file_paths = file_bins[i],
+            bin_size_gb = per_bin_size_gb,
         }
 
         # Step 2: Conditionally convert to HTRMS if do_conversion=true
@@ -254,7 +255,8 @@ task list_files {
         cpu: 2
         memory: "8GB"
         bootDiskSizeGb: 20
-        disks: "local-disk 300 HDD"
+        disks: "local-disk 200 HDD"
+        preemptible: 2
     }
 }
 
@@ -289,7 +291,8 @@ task get_directory_size {
         cpu: 2
         memory: "8GB"
         bootDiskSizeGb: 20
-        disks: "local-disk 300 HDD"
+        disks: "local-disk 200 HDD"
+        preemptible: 2
     }
 }
 
@@ -341,51 +344,15 @@ task create_bins {
         cpu: 2
         memory: "8GB"
         bootDiskSizeGb: 20
-        disks: "local-disk 300 HDD"
-    }
-}
-
-task sum_floats {
-    input {
-        Array[Float] values
-    }
-
-    command <<<
-                python3 <<CODE
-        import json
-
-        # Read values
-        values_file = "~{write_json(values)}"
-        with open(values_file) as f:
-            values = json.load(f)
-
-        # Calculate sum
-        total = sum(values)
-
-        # Write total
-        with open("total.txt", "w") as f:
-            f.write(str(total))
-
-        print(f"Sum of {len(values)} values: {total}")
-        CODE
-    >>>
-
-    output {
-        Float total = read_float("total.txt")
-    }
-
-    runtime {
-        docker: "python:3.9-slim"
-        cpu: 2
-        memory: "8GB"
-        bootDiskSizeGb: 20
-        disks: "local-disk 300 HDD"
+        disks: "local-disk 200 HDD"
+        preemptible: 2
     }
 }
 
 task download_and_size_binned {
     input {
         Array[String] input_file_paths
+        Float bin_size_gb
     }
 
     command <<<
@@ -435,8 +402,8 @@ task download_and_size_binned {
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 128
-        disks: "local-disk 2000 HDD"
-        preemptible: 0
+        disks: "local-disk ~{ceil(bin_size_gb * 3)} HDD"
+        preemptible: 2
     }
 }
 
@@ -479,7 +446,7 @@ task htrms_conversion_binned {
             -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
 
         # Move all HTRMS files to output
-        echo "Moving HTRMS files..."
+        echo "Moving HTRMS files to the final output directory..."
         htrms_count=$(find "${output_dir}" -type f -name "*.htrms" | wc -l)
         if [ "${htrms_count}" -eq 0 ]; then
             echo "ERROR: No .htrms files produced" >&2
@@ -534,7 +501,7 @@ task htrms_conversion_binned {
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.3"
         cpu: 16
-        memory: "32GB"
+        memory: "30GB"
         bootDiskSizeGb: 128
         disks: "local-disk ~{ceil(raw_size_gb * 5)} HDD"
         preemptible: n_preemptible
@@ -562,17 +529,20 @@ task directDIA_search_binned {
 
         cromwell_root=$(pwd)
 
+        echo "Creating input directory..."
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
 
+        echo "Creating output directory..."
         output_dir="${cromwell_root}/out_archive"
         mkdir -p "${output_dir}"
 
+        echo "Creating temporary directory ..."
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all HTRMS files to input directory
-        echo "Copying HTRMS files..."
+        # Copy all files to input directory
+        echo "Copying files to the input directory..."
         while IFS= read -r htrms_file; do
             if [ -n "${htrms_file}" ]; then
                 cp "${htrms_file}" "${input_dir}/"
@@ -581,11 +551,11 @@ task directDIA_search_binned {
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{
-                enzyme_database}"
+            echo "Importing the provided enzyme database..."
+            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
+        echo "Starting directDIA search to generate search archive..."
         spectronaut direct \
             -d "${input_dir}" \
             -fasta "~{fasta_1}" \
@@ -596,7 +566,7 @@ task directDIA_search_binned {
             -setTemp "${tmp_dir}" 2>&1 | tee archive_generation.log
 
         # Rename and move .psar files with unique bin_index suffix
-        echo "Renaming and moving search archives..."
+        echo "Moving search archives to the final output directory..."
         psar_count=$(find "${output_dir}" -type f -name "*.psar" | wc -l)
         if [ "${psar_count}" -eq 0 ]; then
             echo "ERROR: No .psar files produced" >&2
@@ -609,7 +579,7 @@ task directDIA_search_binned {
             mv "${psar_file}" "${cromwell_root}/${new_name}"
         done
 
-        echo "Archive generation complete. Generated ${psar_count} search archives."
+        echo "Archive generation complete!"
 
         # Memory usage reporting
         echo "=== Memory Usage Report ==="
@@ -654,6 +624,45 @@ task directDIA_search_binned {
     }
 }
 
+task sum_floats {
+    input {
+        Array[Float] values
+    }
+
+    command <<<
+                python3 <<CODE
+        import json
+
+        # Read values
+        values_file = "~{write_json(values)}"
+        with open(values_file) as f:
+            values = json.load(f)
+
+        # Calculate sum
+        total = sum(values)
+
+        # Write total
+        with open("total.txt", "w") as f:
+            f.write(str(total))
+
+        print(f"Sum of {len(values)} values: {total}")
+        CODE
+    >>>
+
+    output {
+        Float total = read_float("total.txt")
+    }
+
+    runtime {
+        docker: "python:3.9-slim"
+        cpu: 2
+        memory: "8GB"
+        bootDiskSizeGb: 20
+        disks: "local-disk 200 HDD"
+        preemptible: 2
+    }
+}
+
 task combine_archives {
     input {
         Array[File] input_archives
@@ -670,6 +679,7 @@ task combine_archives {
         cromwell_root=$(pwd)
         merged_library="merged_library.kit"
 
+        echo "Creating input directory..."
         work_archives="${cromwell_root}/work_archives"
         mkdir -p "${work_archives}"
 
@@ -680,6 +690,7 @@ task combine_archives {
             fi
         done < ~{write_lines(input_archives)}
 
+        echo "Merging search archives (.psar) into a library (.kit)..."
         spectronaut lg -se Pulsar \
             -sad "${work_archives}" \
             -k "${cromwell_root}/${merged_library}" \
@@ -690,7 +701,7 @@ task combine_archives {
             exit 1
         fi
 
-        echo "Archive merging complete."
+        echo "Archive merging complete!"
 
         # Memory usage reporting
         echo "=== Memory Usage Report ==="
@@ -769,7 +780,7 @@ task dia_analysis_binned {
         mkdir -p "${tmp_dir}"
 
         # Copy all HTRMS files to input directory
-        echo "Copying HTRMS files..."
+        echo "Copying iles..."
         while IFS= read -r htrms_file; do
             if [ -n "${htrms_file}" ] && [ -f "${htrms_file}" ]; then
                 cp "${htrms_file}" "${input_dir}/"
