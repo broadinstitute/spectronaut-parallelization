@@ -7,32 +7,40 @@ version development
 # Disk sizes are calculated dynamically based on actual input file sizes
 workflow parallel_spectronaut {
     input {
+        # REQUIRED CORE INPUTS
         File fasta_1
         String experiment_name
         String file_directory
-        Int num_vms  # Number of VMs to use for parallel processing
-        File? fasta_2
-        File? fasta_3
-        File? enzyme_database
-        File? convert_schema
-        File? directDIA_settings  # For search archive generation
-        File? DIA_analysis_settings  # For the actual DIA search against combined search archive
-        File? condition_setup
-        File? report_schema_1
-        File? report_schema_2
-        File? report_schema_3
-        File? report_schema_4
-        File? json_settings
+
+        # CONFIGURATION (with defaults)
+        Int num_vms = 10  # Number of VMs to use for parallel processing (default: 10, auto-adjusted based on file count)
         Boolean do_conversion = true  # If true, convert raw files to HTRMS; if false, use raw files directly
         String experiment_type = "proteome"  # proteome / ptm
         Int disk_size_multiplier = 5  # Multiplier for disk size calculation
 
-        # Task-specific preemptible settings
+        # ADDITIONAL FASTA DATABASES
+        File? fasta_2
+        File? fasta_3
+
+        # DATABASE & SCHEMA FILES
+        File? enzyme_database
+        File? convert_schema
+        File? directDIA_settings  # For search archive generation and DIA analysis
+
+        # REPORT & OUTPUT CONFIGURATION
+        File? condition_setup
+        File? json_settings
+        File? report_schema_1
+        File? report_schema_2
+        File? report_schema_3
+        File? report_schema_4
+
+        # PREEMPTIBLE SETTINGS
         Int n_preemptible_htrms_conversion = 0
         Int n_preemptible_directDIA_search = 0
         Int n_preemptible_combine_archives = 0
         Int n_preemptible_dia_analysis = 0
-        Int n_preemptible_combine_sne = 0
+        Int n_preemptible_sne_merge = 0
     }
 
     # Compute preset configurations based on experiment_type
@@ -63,11 +71,11 @@ workflow parallel_spectronaut {
         "ptm": 150,
     }
 
-    Map[String, Int] combine_sne_cpu_presets = {
+    Map[String, Int] sne_merge_cpu_presets = {
         "proteome": 16,
         "ptm": 16,
     }
-    Map[String, Int] combine_sne_ram_gb_presets = {
+    Map[String, Int] sne_merge_ram_gb_presets = {
         "proteome": 40,
         "ptm": 80,
     }
@@ -82,143 +90,158 @@ workflow parallel_spectronaut {
     Int dia_analysis_cpu = dia_analysis_cpu_presets[experiment_type]
     Int dia_analysis_ram_gb = dia_analysis_ram_gb_presets[experiment_type]
 
-    Int combine_sne_cpu = combine_sne_cpu_presets[experiment_type]
-    Int combine_sne_ram_gb = combine_sne_ram_gb_presets[experiment_type]
+    Int sne_merge_cpu = sne_merge_cpu_presets[experiment_type]
+    Int sne_merge_ram_gb = sne_merge_ram_gb_presets[experiment_type]
 
-    # List all files in the provided directory and get total size
+    # PHASE 1: List all files in the provided directory
     call list_files { input:
         gcs_path = file_directory,
     }
 
-    call get_directory_size { input:
-        gcs_path = file_directory,
-    }
-
     Array[String] file_paths = read_lines(list_files.file_list)
+    Int num_files = length(file_paths)
 
-    # Create bins using round-robin distribution
-    call create_bins { input:
-        file_paths = file_paths,
-        num_bins = num_vms,
+    # PHASE 2: Determine actual num_vms based on file count and user input
+    call determine_num_vms { input:
+        requested_num_vms = num_vms,
+        num_files = num_files,
     }
 
-    Array[Array[String]] file_bins = read_json(create_bins.bins_json)
+    Int actual_num_vms = determine_num_vms.actual_num_vms
 
-    # Calculate per-bin size for disk allocation (assumes equal distribution)
-    Float per_bin_size_gb = get_directory_size.total_size_gb / num_vms
-
-    # Scatter over bins - each bin is processed in one VM
-    scatter (i in range(length(file_bins))) {
-        # Step 1: Always download files and calculate size
-        # The size calculated is used to dynamically set disk size for HTRMS conversion
-        call download_and_size_binned { input:
-            input_file_paths = file_bins[i],
-            bin_size_gb = per_bin_size_gb,
+    # PHASE 3: Download and convert all files individually (one file per VM)
+    scatter (file_path in file_paths) {
+        call download_and_convert_single { input:
+            file_path = file_path,
+            do_conversion = do_conversion,
+            convert_schema = convert_schema,
+            n_preemptible = n_preemptible_htrms_conversion,
         }
+    }
 
-        # Step 2: Conditionally convert to HTRMS if do_conversion=true
-        if (do_conversion) {
-            call htrms_conversion_binned { input:
-                input_files = download_and_size_binned.downloaded_files,
-                raw_size_gb = per_bin_size_gb,
-                convert_schema = convert_schema,
-                n_preemptible = n_preemptible_htrms_conversion,
-            }
-        }
+    # Pool all converted/downloaded files
+    Array[File] all_converted_files = download_and_convert_single.output_file
+    Array[Float] file_sizes_gb = download_and_convert_single.file_size_gb
 
-        # Step 3: Select files and sizes based on whether conversion happened
-        # Search HTRMS-converted files if do_conversion=true; otherwise, search raw input files
-        Array[File] search_input_files = select_first([
-            htrms_conversion_binned.htrms_files,
-            download_and_size_binned.downloaded_files,
-        ])
-        # Use size of HTRMS-converted files if available; otherwise, use upfront per-bin size
-        Float search_size_gb = select_first([
-            htrms_conversion_binned.total_size_gb,
-            per_bin_size_gb,
-        ])
+    # Calculate total size for disk allocation
+    call sum_floats as sum_all_sizes { input:
+        values = file_sizes_gb,
+    }
 
-        # Step 4: DirectDIA search for search archive generation *only*
-        # Uses directDIA search instead of Pulsar search ("spectronaut lg -se Pulsar") because the latter only supports vendor's raw file format, which is more expensive
-        call directDIA_search_binned { input:
-            input_files = search_input_files,
-            analysis_schema = directDIA_settings,
+    Float total_size_gb = sum_all_sizes.total
+    Float per_bin_size_gb = total_size_gb / actual_num_vms
+
+    # PHASE 4: Branch based on actual_num_vms
+    if (actual_num_vms == 1) {
+        # Single VM path: Direct search producing final output (no two-step process)
+        call directDIA_search_and_analyze_single { input:
+            experiment_name = experiment_name,
+            input_files = all_converted_files,
+            total_size_gb = total_size_gb,
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
             fasta_3 = fasta_3,
             enzyme_database = enzyme_database,
+            directDIA_settings = directDIA_settings,
+            condition_setup = condition_setup,
+            report_schema_1 = report_schema_1,
+            report_schema_2 = report_schema_2,
+            report_schema_3 = report_schema_3,
+            report_schema_4 = report_schema_4,
+            json_settings = json_settings,
+            disk_size_multiplier = disk_size_multiplier,
             cpu = directDIA_search_cpu,
             ram_gb = directDIA_search_ram_gb,
-            n_preemptible = n_preemptible_directDIA_search,
-            bin_size_gb = search_size_gb,
-            disk_size_multiplier = disk_size_multiplier,
-            bin_index = i,
         }
     }
 
-    # Flatten arrays for combine operations
-    Array[Array[File]] binned_search_files = search_input_files
-    Array[Float] bin_sizes = search_size_gb
-    Array[Array[File]] binned_archives = directDIA_search_binned.search_archives
-    Array[File] all_archives = flatten(binned_archives)
+    if (actual_num_vms > 1) {
+        # PHASE 5: Create bins for parallel processing
+        File converted_files_list = write_lines(all_converted_files)
 
-    # Sum all bin sizes for combine_archives disk allocation
-    call sum_floats as sum_archive_sizes { input:
-        values = bin_sizes,
-    }
+        call create_bins_from_file { input:
+            file_paths_file = converted_files_list,
+            num_bins = actual_num_vms,
+        }
 
-    # Combine scattered search archives into one
-    call combine_archives { input:
-        input_archives = all_archives,
-        total_input_size_gb = sum_archive_sizes.total,
-        disk_size_multiplier = disk_size_multiplier,
-        cpu = combine_archives_cpu,
-        ram_gb = combine_archives_ram_gb,
-        n_preemptible = n_preemptible_combine_archives,
-    }
+        Array[Array[String]] file_bins_paths = read_json(create_bins_from_file.bins_json)
 
-    # DIA analysis for each bin's files (HTRMS if converted, raw if not) against the merged library (.kit)
-    scatter (i in range(length(file_bins))) {
-        call dia_analysis_binned { input:
+        # PHASE 6: DirectDIA search for each bin to generate search archives
+        scatter (bin_idx in range(length(file_bins_paths))) {
+            call convert_paths_to_files as convert_for_search { input:
+                file_paths = file_bins_paths[bin_idx],
+            }
+
+            call directDIA_search_binned { input:
+                input_files = convert_for_search.files,
+                analysis_schema = directDIA_settings,
+                fasta_1 = fasta_1,
+                fasta_2 = fasta_2,
+                fasta_3 = fasta_3,
+                enzyme_database = enzyme_database,
+                cpu = directDIA_search_cpu,
+                ram_gb = directDIA_search_ram_gb,
+                n_preemptible = n_preemptible_directDIA_search,
+                bin_size_gb = per_bin_size_gb,
+                disk_size_multiplier = disk_size_multiplier,
+                bin_index = bin_idx,
+            }
+        }
+
+        # PHASE 7: Combine scattered search archives into one library
+        Array[File] all_archives = flatten(directDIA_search_binned.search_archives)
+
+        call combine_archives { input:
+            input_archives = all_archives,
+            total_input_size_gb = total_size_gb,
+            disk_size_multiplier = disk_size_multiplier,
+            cpu = combine_archives_cpu,
+            ram_gb = combine_archives_ram_gb,
+            n_preemptible = n_preemptible_combine_archives,
+        }
+
+        # PHASE 8: DIA analysis for each bin against the merged library
+        scatter (bin_idx in range(length(file_bins_paths))) {
+            call convert_paths_to_files as convert_for_analysis { input:
+                file_paths = file_bins_paths[bin_idx],
+            }
+
+            call dia_analysis_binned { input:
+                experiment_name = experiment_name,
+                input_files = convert_for_analysis.files,
+                search_archive = combine_archives.merged_archive,
+                analysis_schema = directDIA_settings,
+                fasta_1 = fasta_1,
+                fasta_2 = fasta_2,
+                fasta_3 = fasta_3,
+                json_settings = json_settings,
+                cpu = dia_analysis_cpu,
+                ram_gb = dia_analysis_ram_gb,
+                bin_index = bin_idx,
+                bin_size_gb = per_bin_size_gb,
+                disk_size_multiplier = disk_size_multiplier,
+                n_preemptible = n_preemptible_dia_analysis,
+            }
+        }
+
+        # PHASE 9: Merge scattered SNE files and generate reports
+        Array[File] all_sne = flatten(dia_analysis_binned.sne_files)
+
+        call sne_merge { input:
             experiment_name = experiment_name,
-            input_files = binned_search_files[i],
-            search_archive = combine_archives.merged_archive,
-            analysis_schema = DIA_analysis_settings,
-            fasta_1 = fasta_1,
-            fasta_2 = fasta_2,
-            fasta_3 = fasta_3,
-            json_settings = json_settings,
-            cpu = dia_analysis_cpu,
-            ram_gb = dia_analysis_ram_gb,
-            bin_index = i,
-            bin_size_gb = bin_sizes[i],
+            sne_files = all_sne,
+            analysis_schema = directDIA_settings,
+            condition_setup = condition_setup,
+            report_schema_1 = report_schema_1,
+            report_schema_2 = report_schema_2,
+            report_schema_3 = report_schema_3,
+            report_schema_4 = report_schema_4,
+            cpu = sne_merge_cpu,
+            ram_gb = sne_merge_ram_gb,
+            total_input_size_gb = total_size_gb,
             disk_size_multiplier = disk_size_multiplier,
-            n_preemptible = n_preemptible_dia_analysis,
+            n_preemptible = n_preemptible_sne_merge,
         }
-    }
-
-    Array[File] all_sne = flatten(dia_analysis_binned.sne_files)
-
-    # Sum all bin sizes for combine_sne disk allocation
-    call sum_floats as sum_sne_sizes { input:
-        values = bin_sizes,
-    }
-
-    # Combine scattered SNE files and generate reports
-    call combine_sne { input:
-        experiment_name = experiment_name,
-        sne_files = all_sne,
-        analysis_schema = DIA_analysis_settings,
-        condition_setup = condition_setup,
-        report_schema_1 = report_schema_1,
-        report_schema_2 = report_schema_2,
-        report_schema_3 = report_schema_3,
-        report_schema_4 = report_schema_4,
-        cpu = combine_sne_cpu,
-        ram_gb = combine_sne_ram_gb,
-        total_input_size_gb = sum_sne_sizes.total,
-        disk_size_multiplier = disk_size_multiplier,
-        n_preemptible = n_preemptible_combine_sne,
     }
 }
 
@@ -260,79 +283,174 @@ task list_files {
     }
 }
 
-task get_directory_size {
+task determine_num_vms {
     input {
-        String gcs_path
+        Int requested_num_vms
+        Int num_files
+    }
+
+    command <<<
+        python3 <<CODE
+requested = ~{requested_num_vms}
+num_files = ~{num_files}
+
+# Condition (i): if num_files < 10, set num_vms = num_files
+if num_files < 10:
+    actual = num_files
+    message = f"INFO: Setting num_vms={actual} (number of input files) because total files ({num_files}) < 10"
+# Condition (ii): if user set num_vms=1 but has >25 files, override to 10
+elif requested == 1 and num_files > 25:
+    actual = 10
+    message = f"WARNING: Overriding num_vms from 1 to 10 for efficient runtime with {num_files} files (>25 threshold)"
+else:
+    actual = requested
+    message = f"INFO: Using requested num_vms={actual} for {num_files} files"
+
+print(message, flush=True)
+
+with open("actual_num_vms.txt", "w") as f:
+    f.write(str(actual))
+
+with open("message.txt", "w") as f:
+    f.write(message)
+CODE
+    >>>
+
+    output {
+        Int actual_num_vms = read_int("actual_num_vms.txt")
+        String message = read_string("message.txt")
+    }
+
+    runtime {
+        docker: "python:3.9-slim"
+        cpu: 2
+        memory: "4GB"
+        bootDiskSizeGb: 10
+        disks: "local-disk 10 HDD"
+        preemptible: 2
+    }
+}
+
+task download_and_convert_single {
+    input {
+        String file_path
+        Boolean do_conversion
+        File? convert_schema
+        Int n_preemptible = 0
     }
 
     command <<<
         set -euo pipefail
 
-        # Get total size of directory in bytes using gcloud storage du
-        echo "Calculating total size of: ~{gcs_path}"
+        cromwell_root=$(pwd)
 
-        # gcloud storage du -s outputs: SIZE  PATH
-        # Extract just the size (first column)
-        total_bytes=$(gcloud storage du -s "~{gcs_path}" | awk '{print $1}')
+        # Download file from GCS
+        echo "Downloading file: ~{file_path}"
+        gcloud storage cp "~{file_path}" "${cromwell_root}/"
 
-        # Convert bytes to GB
-        total_gb=$(awk "BEGIN {printf \"%.2f\", ${total_bytes} / (1024^3)}")
+        filename=$(basename "~{file_path}")
+        downloaded_file="${cromwell_root}/${filename}"
 
-        echo "${total_gb}" > total_size_gb.txt
-        echo "Total directory size: ${total_gb} GB"
+        if [ ! -f "${downloaded_file}" ]; then
+            echo "ERROR: Failed to download file" >&2
+            exit 1
+        fi
+
+        # Conditionally convert to HTRMS
+        if [ "~{do_conversion}" = "true" ]; then
+            echo "Converting to HTRMS..."
+
+            input_dir="${cromwell_root}/work_input"
+            mkdir -p "${input_dir}"
+            mv "${downloaded_file}" "${input_dir}/"
+
+            output_dir="${cromwell_root}/out_conversion"
+            mkdir -p "${output_dir}"
+
+            tmp_dir="${cromwell_root}/sn_temp"
+            mkdir -p "${tmp_dir}"
+
+            spectronaut -convert \
+                -i "${input_dir}" \
+                -o "${output_dir}" \
+                ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
+                -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
+
+            # Move HTRMS file to output
+            htrms_file=$(find "${output_dir}" -type f -name "*.htrms" | head -n 1)
+            if [ -z "${htrms_file}" ]; then
+                echo "ERROR: No .htrms file produced" >&2
+                exit 1
+            fi
+
+            mv "${htrms_file}" "${cromwell_root}/"
+            output_file=$(basename "${htrms_file}")
+        else
+            echo "Skipping conversion, using raw file"
+            output_file="${filename}"
+        fi
+
+        # Calculate file size in GB and write output file path
+        echo "Calculating file size..."
+        file_size_bytes=$(du -b "${cromwell_root}/${output_file}" | awk '{print $1}')
+        file_size_gb=$(awk "BEGIN {printf \"%.2f\", ${file_size_bytes} / (1024^3)}")
+        echo "${file_size_gb}" > "${cromwell_root}/file_size_gb.txt"
+        echo "${output_file}" > "${cromwell_root}/output_filename.txt"
+        echo "File size: ${file_size_gb} GB"
+        echo "Output file: ${output_file}"
     >>>
 
     output {
-        Float total_size_gb = read_float("total_size_gb.txt")
+        File output_file = read_string("output_filename.txt")
+        Float file_size_gb = read_float("file_size_gb.txt")
     }
 
     runtime {
-        docker: "google/cloud-sdk:slim"
-        cpu: 2
-        memory: "8GB"
-        bootDiskSizeGb: 20
-        disks: "local-disk 200 HDD"
-        preemptible: 2
+        docker: "cameronlian/panoply-spectronaut:v20.3"
+        cpu: 8
+        memory: "16GB"
+        bootDiskSizeGb: 64
+        disks: "local-disk 500 HDD"
+        preemptible: n_preemptible
     }
 }
 
-task create_bins {
+task create_bins_from_file {
     input {
-        Array[String] file_paths
+        File file_paths_file
         Int num_bins
     }
 
     command <<<
                 python3 <<CODE
-        import json
+import json
 
-        # Read file paths
-        file_paths_file = "~{write_lines(file_paths)}"
-        with open(file_paths_file) as f:
-            files = [line.strip() for line in f if line.strip()]
+# Read file paths from file
+with open("~{file_paths_file}") as f:
+    files = [line.strip() for line in f if line.strip()]
 
-        num_bins = ~{num_bins}
+num_bins = ~{num_bins}
 
-        # Validate num_bins
-        if num_bins < 1:
-            raise ValueError(f"num_bins must be at least 1, got {num_bins}")
+# Validate num_bins
+if num_bins < 1:
+    raise ValueError(f"num_bins must be at least 1, got {num_bins}")
 
-        # Create bins using round-robin distribution
-        bins = [[] for _ in range(num_bins)]
-        for i, file_path in enumerate(files):
-            bin_index = i % num_bins
-            bins[bin_index].append(file_path)
+# Create bins using round-robin distribution
+bins = [[] for _ in range(num_bins)]
+for i, file_path in enumerate(files):
+    bin_index = i % num_bins
+    bins[bin_index].append(file_path)
 
-        # Write bins to JSON
-        with open("bins.json", "w") as f:
-            json.dump(bins, f, indent=2)
+# Write bins to JSON
+with open("bins.json", "w") as f:
+    json.dump(bins, f, indent=2)
 
-        # Print summary
-        print(f"Total files: {len(files)}")
-        print(f"Number of bins: {num_bins}")
-        for i, bin_files in enumerate(bins):
-            print(f"Bin {i}: {len(bin_files)} files")
-        CODE
+# Print summary
+print(f"Total files: {len(files)}")
+print(f"Number of bins: {num_bins}")
+for i, bin_files in enumerate(bins):
+    print(f"Bin {i}: {len(bin_files)} files")
+CODE
     >>>
 
     output {
@@ -349,70 +467,60 @@ task create_bins {
     }
 }
 
-task download_and_size_binned {
+task convert_paths_to_files {
     input {
-        Array[String] input_file_paths
-        Float bin_size_gb
+        Array[String] file_paths
     }
 
     command <<<
-        set -euo pipefail
-
-        cromwell_root=$(pwd)
-
-        input_dir="${cromwell_root}/work_input"
-        mkdir -p "${input_dir}"
-
-        # Download all files in the bin
-        echo "Downloading files from GCS..."
-        while IFS= read -r file_path; do
-            if [ -n "${file_path}" ]; then
-                echo "Downloading: ${file_path}"
-                gcloud storage cp -r "${file_path}" "${input_dir}/"
-            fi
-        done < ~{write_lines(input_file_paths)}
-
-        # Move all files to output
-        echo "Moving files to output..."
-        file_count=$(find "${input_dir}" -type f | wc -l)
-        if [ "${file_count}" -eq 0 ]; then
-            echo "ERROR: No files downloaded" >&2
-            exit 1
-        fi
-
-        find "${input_dir}" -type f -exec mv {} "${cromwell_root}/" \;
-
-        echo "Download complete. Downloaded ${file_count} files."
-
-        # Calculate total size in GB
-        echo "Calculating total file size..."
-        total_size_bytes=$(find "${cromwell_root}" -type f ! -name "*.txt" -exec du -b {} + | awk '{sum += $1} END {print sum}')
-        total_size_gb=$(awk "BEGIN {printf \"%.2f\", ${total_size_bytes} / (1024^3)}")
-        echo "${total_size_gb}" > "${cromwell_root}/total_size_gb.txt"
-        echo "Total file size: ${total_size_gb} GB"
+        # Write paths to file, which will be read back as File objects for localization
+        while IFS= read -r path; do
+            echo "${path}"
+        done < ~{write_lines(file_paths)} > file_list.txt
     >>>
 
     output {
-        Array[File] downloaded_files = glob("*")
-        Float total_size_gb = read_float("total_size_gb.txt")
+        Array[File] files = read_lines("file_list.txt")
     }
 
     runtime {
         docker: "google/cloud-sdk:slim"
-        cpu: 16
-        memory: "32GB"
-        bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * 3)} HDD"
+        cpu: 2
+        memory: "4GB"
+        bootDiskSizeGb: 10
+        disks: "local-disk 10 HDD"
         preemptible: 2
     }
 }
 
-task htrms_conversion_binned {
+task directDIA_search_and_analyze_single {
     input {
+        # Primary data inputs
+        String experiment_name
         Array[File] input_files
-        Float raw_size_gb
-        File? convert_schema
-        Int n_preemptible = 0
+        File fasta_1
+
+        # Additional FASTA databases
+        File? fasta_2
+        File? fasta_3
+
+        # Database & schema files
+        File? enzyme_database
+        File? directDIA_settings
+
+        # Report & output configuration
+        File? condition_setup
+        File? json_settings
+        File? report_schema_1
+        File? report_schema_2
+        File? report_schema_3
+        File? report_schema_4
+
+        # Resource parameters
+        Int cpu
+        Int ram_gb
+        Float total_size_gb
+        Int disk_size_multiplier
     }
 
     command <<<
@@ -423,13 +531,13 @@ task htrms_conversion_binned {
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
 
-        output_dir="${cromwell_root}/out_conversion"
+        output_dir="${cromwell_root}/out"
         mkdir -p "${output_dir}"
 
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all input files to input directory
+        # Copy all input files
         echo "Copying input files..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
@@ -437,40 +545,46 @@ task htrms_conversion_binned {
             fi
         done < ~{write_lines(input_files)}
 
-        # Convert all files to HTRMS
-        echo "Starting HTRMS conversion..."
-        spectronaut -convert \
-            -i "${input_dir}" \
-            -o "${output_dir}" \
-            ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
-            -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
+        # Import enzyme database if provided
+        if [ ~{defined(enzyme_database)} = true ]; then
+            echo "Importing enzyme database..."
+            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
+        fi
 
-        # Move all HTRMS files to output
-        echo "Moving HTRMS files to the final output directory..."
-        htrms_count=$(find "${output_dir}" -type f -name "*.htrms" | wc -l)
-        if [ "${htrms_count}" -eq 0 ]; then
-            echo "ERROR: No .htrms files produced" >&2
+        # Run Spectronaut DirectDIA (single-step search producing final output)
+        echo "Starting DirectDIA search (single VM, no parallelization)..."
+        spectronaut direct \
+            -d "${input_dir}" \
+            -fasta "~{fasta_1}" \
+            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+            ~{if defined(directDIA_settings) then "-s " + directDIA_settings else ""} \
+            ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
+            ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
+            ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
+            ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
+            ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} \
+            ~{if defined(json_settings) then "-j " + json_settings else ""} \
+            -n "~{experiment_name}" \
+            -o "${output_dir}" \
+            -setTemp "${tmp_dir}" 2>&1 | tee spectronaut_single.log
+
+        # Create output archive
+        echo "Creating output archive..."
+        zip -r spectronaut_output.zip "${output_dir}" -x \\*.zip
+
+        if [ ! -f "spectronaut_output.zip" ]; then
+            echo "ERROR: Failed to create output zip file" >&2
             exit 1
         fi
 
-        find "${output_dir}" -type f -name "*.htrms" -exec mv {} "${cromwell_root}/" \;
-
-        echo "Conversion complete. Generated ${htrms_count} HTRMS files."
-
-        # Calculate total size in GB for HTRMS converted files
-        echo "Calculating total HTRMS file size..."
-        total_size_bytes=$(find "${cromwell_root}" -type f -name "*.htrms" -exec du -b {} + | awk '{sum += $1} END {print sum}')
-        total_size_gb=$(awk "BEGIN {printf \"%.2f\", ${total_size_bytes} / (1024^3)}")
-        echo "${total_size_gb}" > "${cromwell_root}/total_size_gb.txt"
-        echo "Total HTRMS file size: ${total_size_gb} GB"
+        echo "DirectDIA search complete!"
 
         # Memory usage reporting
         echo "=== Memory Usage Report ==="
-        # Cgroup V2 (modern)
         if [ -f /sys/fs/cgroup/memory.peak ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
             limit_bytes=$(cat /sys/fs/cgroup/memory.max)
-        # Cgroup V1 (legacy)
         elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
             limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
@@ -482,7 +596,7 @@ task htrms_conversion_binned {
         if [ "$max_mem_bytes" -gt 0 ]; then
             max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
-            
+
             if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
                 limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
                 usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
@@ -494,33 +608,41 @@ task htrms_conversion_binned {
     >>>
 
     output {
-        Array[File] htrms_files = glob("*.htrms")
-        Float total_size_gb = read_float("total_size_gb.txt")
+        File spectronaut_output = "spectronaut_output.zip"
     }
 
     runtime {
         docker: "cameronlian/panoply-spectronaut:v20.3"
-        cpu: 16
-        memory: "30GB"
+        cpu: cpu
+        memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(raw_size_gb * 5)} HDD"
-        preemptible: n_preemptible
+        disks: "local-disk ~{ceil(total_size_gb * disk_size_multiplier)} HDD"
+        preemptible: 0
     }
 }
 
 task directDIA_search_binned {
     input {
-        File fasta_1
+        # Primary data inputs
         Array[File] input_files
-        Float bin_size_gb
-        Int disk_size_multiplier
-        Int cpu
-        Int ram_gb
         Int bin_index
-        File? analysis_schema
+        File fasta_1
+
+        # Additional FASTA databases
         File? fasta_2
         File? fasta_3
+
+        # Database & schema files
         File? enzyme_database
+        File? analysis_schema
+
+        # Resource parameters
+        Int cpu
+        Int ram_gb
+        Float bin_size_gb
+        Int disk_size_multiplier
+
+        # Operational parameters
         Int n_preemptible = 0
     }
 
@@ -665,11 +787,16 @@ task sum_floats {
 
 task combine_archives {
     input {
+        # Primary data inputs
         Array[File] input_archives
-        Float total_input_size_gb
-        Int disk_size_multiplier
+
+        # Resource parameters
         Int cpu
         Int ram_gb
+        Float total_input_size_gb
+        Int disk_size_multiplier
+
+        # Operational parameters
         Int n_preemptible = 0
     }
 
@@ -748,20 +875,31 @@ task combine_archives {
 
 task dia_analysis_binned {
     input {
-        File search_archive
-        File fasta_1
-        Array[File] input_files
+        # Primary data inputs
         String experiment_name
-        Float bin_size_gb
-        Int disk_size_multiplier
-        Int cpu
-        Int ram_gb
+        Array[File] input_files
+        File search_archive
         Int bin_index
-        File? enzyme_database
-        File? analysis_schema
+        File fasta_1
+
+        # Additional FASTA databases
         File? fasta_2
         File? fasta_3
+
+        # Database & schema files
+        File? enzyme_database
+        File? analysis_schema
+
+        # Configuration files
         File? json_settings
+
+        # Resource parameters
+        Int cpu
+        Int ram_gb
+        Float bin_size_gb
+        Int disk_size_multiplier
+
+        # Operational parameters
         Int n_preemptible = 0
     }
 
@@ -861,20 +999,29 @@ task dia_analysis_binned {
     }
 }
 
-task combine_sne {
+task sne_merge {
     input {
-        Array[File] sne_files
+        # Primary data inputs
         String experiment_name
-        Float total_input_size_gb
-        Int disk_size_multiplier
-        Int ram_gb
-        Int cpu
+        Array[File] sne_files
+
+        # Configuration & schema files
+        File? analysis_schema
         File? condition_setup
+
+        # Report configuration
         File? report_schema_1
         File? report_schema_2
         File? report_schema_3
         File? report_schema_4
-        File? analysis_schema
+
+        # Resource parameters
+        Int cpu
+        Int ram_gb
+        Float total_input_size_gb
+        Int disk_size_multiplier
+
+        # Operational parameters
         Int n_preemptible = 0
     }
 
