@@ -158,7 +158,7 @@ workflow parallel_spectronaut {
     if (actual_num_vms > 1) {
         # PHASE 5: Create bins for parallel processing
         call write_array_to_file { input:
-            files = all_converted_files,
+            file_paths = all_converted_files,
         }
 
         call create_bins_from_file { input:
@@ -789,14 +789,14 @@ task sum_floats {
 
 task write_array_to_file {
     input {
-        Array[File] files
+        Array[String] file_paths
     }
 
     command <<<
         # Write file paths to output file
         while IFS= read -r file_path; do
             echo "${file_path}"
-        done < ~{write_lines(files)} > file_paths.txt
+        done < ~{write_lines(file_paths)} > file_paths.txt
     >>>
 
     output {
