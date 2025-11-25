@@ -120,7 +120,7 @@ workflow parallel_spectronaut {
     }
 
     # Pool all converted/downloaded files
-    Array[File] all_converted_files = download_and_convert_single.output_file
+    Array[File] all_converted_files = flatten(download_and_convert_single.htrms_files)
     Array[Float] file_sizes_gb = download_and_convert_single.file_size_gb
 
     # Calculate total size for disk allocation
@@ -368,7 +368,8 @@ task download_and_convert_single {
                 echo "ERROR: No .htrms files produced" >&2
                 exit 1
             fi
-            mv "${htrms_file}" "${cromwell_root}/${output_filename}"
+            
+            find "${output_dir}" -type f -name "*.htrms" -exec mv {} "${cromwell_root}/" \;
 
             echo "Conversion complete: ${output_filename}"
 
@@ -398,13 +399,10 @@ task download_and_convert_single {
             echo "File size: ${file_size_gb} GB"
             echo "Downloaded: ~{file_path}"
         fi
-
-        # Save output filename for WDL output declaration
-        echo "${output_filename}" > output_filename.txt
     >>>
 
     output {
-        File output_file = read_string("output_filename.txt")
+        Array[File] htrms_files = glob("*.htrms")
         Float file_size_gb = read_float("file_size_gb.txt")
     }
 
