@@ -170,12 +170,8 @@ workflow parallel_spectronaut {
 
         # PHASE 6:directDIA search for each bin to generate search archives
         scatter (bin_idx in range(length(file_bins_paths))) {
-            call convert_paths_to_files as convert_for_search { input:
-                file_paths = file_bins_paths[bin_idx],
-            }
-
             call directDIA_search_binned { input:
-                input_files = convert_for_search.files,
+                input_file_paths = file_bins_paths[bin_idx],
                 analysis_settings = directDIA_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
@@ -204,13 +200,9 @@ workflow parallel_spectronaut {
 
         # PHASE 8: DIA analysis for each bin against the merged library
         scatter (bin_idx in range(length(file_bins_paths))) {
-            call convert_paths_to_files as convert_for_analysis { input:
-                file_paths = file_bins_paths[bin_idx],
-            }
-
             call dia_analysis_binned { input:
                 experiment_name = experiment_name,
-                input_files = convert_for_analysis.files,
+                input_file_paths = file_bins_paths[bin_idx],
                 search_archive = combine_archives.merged_archive,
                 analysis_settings = directDIA_settings,
                 fasta_1 = fasta_1,
@@ -469,32 +461,6 @@ CODE
     }
 }
 
-task convert_paths_to_files {
-    input {
-        Array[String] file_paths
-    }
-
-    command <<<
-        # Write paths to file, which will be read back as File objects for localization
-        while IFS= read -r path; do
-            echo "${path}"
-        done < ~{write_lines(file_paths)} > file_list.txt
-    >>>
-
-    output {
-        Array[File] files = read_lines("file_list.txt")
-    }
-
-    runtime {
-        docker: "google/cloud-sdk:slim"
-        cpu: 2
-        memory: "4GB"
-        bootDiskSizeGb: 10
-        disks: "local-disk 50 HDD"
-        preemptible: 2
-    }
-}
-
 task directDIA_search_and_analyze_single {
     input {
         # Primary data inputs
@@ -626,7 +592,7 @@ task directDIA_search_and_analyze_single {
 task directDIA_search_binned {
     input {
         # Primary data inputs
-        Array[File] input_files
+        Array[String] input_file_paths
         Int bin_index
         File fasta_1
 
@@ -665,13 +631,25 @@ task directDIA_search_binned {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Symlink all files to input directory (saves 50% disk space)
-        echo "Symlinking files to the input directory..."
-        while IFS= read -r htrms_file; do
-            if [ -n "${htrms_file}" ]; then
-                ln -sf "${htrms_file}" "${input_dir}/"
+        # Manual localization: Download files from GCS
+        echo "Starting manual download of input files from GCS..."
+
+        # Write GCS paths to a file
+        cat <<'EOF' > download_list.txt
+~{sep="\n" input_file_paths}
+EOF
+
+        # Download each file using gcloud storage cp
+        file_count=0
+        while IFS= read -r gcs_path; do
+            if [ -n "$gcs_path" ]; then
+                echo "Downloading: $gcs_path"
+                gcloud storage cp "$gcs_path" "${input_dir}/"
+                ((file_count++))
             fi
-        done < ~{write_lines(input_files)}
+        done < download_list.txt
+
+        echo "Manual download complete. Downloaded ${file_count} files."
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
@@ -905,7 +883,7 @@ task dia_analysis_binned {
     input {
         # Primary data inputs
         String experiment_name
-        Array[File] input_files
+        Array[String] input_file_paths
         File search_archive
         Int bin_index
         File fasta_1
@@ -945,13 +923,25 @@ task dia_analysis_binned {
         tmp_dir="${cromwell_root}/work_dia_temp"
         mkdir -p "${tmp_dir}"
 
-        # Symlink all HTRMS files to input directory (saves disk space)
-        echo "Symlinking files..."
-        while IFS= read -r htrms_file; do
-            if [ -n "${htrms_file}" ] && [ -f "${htrms_file}" ]; then
-                ln -sf "${htrms_file}" "${input_dir}/"
+        # Manual localization: Download files from GCS
+        echo "Starting manual download of input files from GCS..."
+
+        # Write GCS paths to a file
+        cat <<'EOF' > download_list.txt
+~{sep="\n" input_file_paths}
+EOF
+
+        # Download each file using gcloud storage cp
+        file_count=0
+        while IFS= read -r gcs_path; do
+            if [ -n "$gcs_path" ]; then
+                echo "Downloading: $gcs_path"
+                gcloud storage cp "$gcs_path" "${input_dir}/"
+                ((file_count++))
             fi
-        done < ~{write_lines(input_files)}
+        done < download_list.txt
+
+        echo "Manual download complete. Downloaded ${file_count} files."
 
                 # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
