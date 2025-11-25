@@ -120,7 +120,7 @@ workflow parallel_spectronaut {
     }
 
     # Pool all converted/downloaded files
-    Array[String] all_converted_files = download_and_convert_single.output_file_path
+    Array[File] all_converted_files = download_and_convert_single.output_file
     Array[Float] file_sizes_gb = download_and_convert_single.file_size_gb
 
     # Calculate total size for disk allocation
@@ -129,7 +129,6 @@ workflow parallel_spectronaut {
     }
 
     Float total_size_gb = sum_all_sizes.total
-    Float per_bin_size_gb = total_size_gb / actual_num_vms
 
     # PHASE 4: Branch based on actual_num_vms
     if (actual_num_vms == 1) {
@@ -156,18 +155,13 @@ workflow parallel_spectronaut {
     }
 
     if (actual_num_vms > 1) {
-        # PHASE 5: Create bins for parallel processing
-        call create_bins_from_file { input:
-            file_paths = all_converted_files,
-            num_bins = actual_num_vms,
-        }
-
-        Array[Array[String]] file_bins_paths = read_json(create_bins_from_file.bins_json)
-
-        # PHASE 6:directDIA search for each bin to generate search archives
-        scatter (bin_idx in range(length(file_bins_paths))) {
+        # PHASE 5: directDIA search for each bin to generate search archives
+        # Each bin receives ALL files and filters to its assigned files using round-robin
+        scatter (bin_idx in range(actual_num_vms)) {
             call directDIA_search_binned { input:
-                input_file_paths = file_bins_paths[bin_idx],
+                all_input_files = all_converted_files,
+                bin_index = bin_idx,
+                num_bins = actual_num_vms,
                 analysis_settings = directDIA_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
@@ -176,13 +170,12 @@ workflow parallel_spectronaut {
                 cpu = directDIA_search_cpu,
                 ram_gb = directDIA_search_ram_gb,
                 n_preemptible = n_preemptible_directDIA_search,
-                bin_size_gb = per_bin_size_gb,
+                total_size_gb = total_size_gb,
                 disk_size_multiplier = disk_size_multiplier,
-                bin_index = bin_idx,
             }
         }
 
-        # PHASE 7: Combine scattered search archives into one library
+        # PHASE 6: Combine scattered search archives into one library
         Array[File] all_archives = flatten(directDIA_search_binned.search_archives)
 
         call combine_archives { input:
@@ -194,11 +187,13 @@ workflow parallel_spectronaut {
             n_preemptible = n_preemptible_combine_archives,
         }
 
-        # PHASE 8: DIA analysis for each bin against the merged library
-        scatter (bin_idx in range(length(file_bins_paths))) {
+        # PHASE 7: DIA analysis for each bin against the merged library
+        scatter (bin_idx in range(actual_num_vms)) {
             call dia_analysis_binned { input:
                 experiment_name = experiment_name,
-                input_file_paths = file_bins_paths[bin_idx],
+                all_input_files = all_converted_files,
+                bin_index = bin_idx,
+                num_bins = actual_num_vms,
                 search_archive = combine_archives.merged_archive,
                 analysis_settings = directDIA_settings,
                 fasta_1 = fasta_1,
@@ -207,14 +202,13 @@ workflow parallel_spectronaut {
                 json_settings = json_settings,
                 cpu = dia_analysis_cpu,
                 ram_gb = dia_analysis_ram_gb,
-                bin_index = bin_idx,
-                bin_size_gb = per_bin_size_gb,
+                total_size_gb = total_size_gb,
                 disk_size_multiplier = disk_size_multiplier,
                 n_preemptible = n_preemptible_dia_analysis,
             }
         }
 
-        # PHASE 9: Merge scattered SNE files and generate reports
+        # PHASE 8: Merge scattered SNE files and generate reports
         Array[File] all_sne = flatten(dia_analysis_binned.sne_files)
 
         call sne_merge { input:
@@ -335,7 +329,6 @@ task download_and_convert_single {
         cromwell_root=$(pwd)
         filename=$(basename "~{file_path}")
 
-        # LOGIC BRANCH: Only download if we actually need to convert
         if [ "~{do_conversion}" = "true" ]; then
             echo "Conversion requested. Downloading file..."
             gcloud storage cp "~{file_path}" "${cromwell_root}/"
@@ -365,51 +358,46 @@ task download_and_convert_single {
                 ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
                 -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
 
-            # Move HTRMS file to output
+            # Move HTRMS file to known output location
             htrms_file=$(find "${output_dir}" -type f -name "*.htrms" | head -n 1)
             if [ -z "${htrms_file}" ]; then
-                echo "ERROR: No .htrms file produced" >&2
+                echo "ERROR: No .htrms files produced" >&2
                 exit 1
             fi
+            mv "${htrms_file}" "${cromwell_root}/converted_output"
 
-            mv "${htrms_file}" "${cromwell_root}/"
-            output_file=$(basename "${htrms_file}")
+            echo "Conversion complete."
 
             # Calculate size of the converted file
-            file_size_bytes=$(du -b "${cromwell_root}/${output_file}" | awk '{print $1}')
+            file_size_bytes=$(stat -c%s "${cromwell_root}/converted_output" 2>/dev/null || stat -f%z "${cromwell_root}/converted_output")
             file_size_gb=$(awk "BEGIN {printf \"%.2f\", ${file_size_bytes} / (1024^3)}")
-
-            echo "${output_file}" > output_filename.txt
             echo "${file_size_gb}" > file_size_gb.txt
 
             echo "File size: ${file_size_gb} GB"
-            echo "Output file: ${output_file}"
 
         else
-            echo "No conversion requested. Fetching metadata only..."
+            echo "No conversion requested. Downloading file directly..."
 
-            # OPTIMIZATION: Get size from GCS without downloading!
-            # Uses gcloud storage ls --json to get size in bytes
-            file_size_bytes=$(gcloud storage ls --json "~{file_path}" | grep '"size":' | head -n1 | awk -F': ' '{print $2}' | sed 's/[",]//g')
+            # Download file to known output location
+            gcloud storage cp "~{file_path}" "${cromwell_root}/converted_output"
 
-            if [ -z "$file_size_bytes" ]; then
-                echo "ERROR: Could not fetch file size from GCS" >&2
+            if [ ! -f "${cromwell_root}/converted_output" ]; then
+                echo "ERROR: Failed to download file" >&2
                 exit 1
             fi
 
+            # Calculate size
+            file_size_bytes=$(stat -c%s "${cromwell_root}/converted_output" 2>/dev/null || stat -f%z "${cromwell_root}/converted_output")
             file_size_gb=$(awk "BEGIN {printf \"%.2f\", ${file_size_bytes} / (1024^3)}")
-
-            # Return the GCS path (since we didn't download/convert)
-            echo "~{file_path}" > output_filename.txt
             echo "${file_size_gb}" > file_size_gb.txt
 
-            echo "File size: ${file_size_gb} GB (from metadata)"
-            echo "File path: ~{file_path}"
+            echo "File size: ${file_size_gb} GB"
+            echo "Downloaded: ~{file_path}"
         fi
     >>>
 
     output {
-        String output_file_path = read_string("output_filename.txt")
+        File output_file = "converted_output"
         Float file_size_gb = read_float("file_size_gb.txt")
     }
 
@@ -418,60 +406,8 @@ task download_and_convert_single {
         cpu: if do_conversion then 16 else 2
         memory: if do_conversion then "32GB" else "4GB"
         bootDiskSizeGb: if do_conversion then 64 else 10
-        disks: "local-disk " + (if do_conversion then "500" else "20") + " HDD"
+        disks: "local-disk " + (if do_conversion then "500" else "100") + " HDD"
         preemptible: n_preemptible
-    }
-}
-
-task create_bins_from_file {
-    input {
-        Array[String] file_paths
-        Int num_bins
-    }
-
-    command <<<
-                python3 <<CODE
-import json
-
-# Read file paths from WDL's write_lines() output
-with open("~{write_lines(file_paths)}") as f:
-    files = [line.strip() for line in f if line.strip()]
-
-num_bins = ~{num_bins}
-
-# Validate num_bins
-if num_bins < 1:
-    raise ValueError(f"num_bins must be at least 1, got {num_bins}")
-
-# Create bins using round-robin distribution
-bins = [[] for _ in range(num_bins)]
-for i, file_path in enumerate(files):
-    bin_index = i % num_bins
-    bins[bin_index].append(file_path)
-
-# Write bins to JSON
-with open("bins.json", "w") as f:
-    json.dump(bins, f, indent=2)
-
-# Print summary
-print(f"Total files: {len(files)}")
-print(f"Number of bins: {num_bins}")
-for i, bin_files in enumerate(bins):
-    print(f"Bin {i}: {len(bin_files)} files")
-CODE
-    >>>
-
-    output {
-        File bins_json = "bins.json"
-    }
-
-    runtime {
-        docker: "python:3.9-slim"
-        cpu: 2
-        memory: "8GB"
-        bootDiskSizeGb: 20
-        disks: "local-disk 200 HDD"
-        preemptible: 2
     }
 }
 
@@ -605,9 +541,10 @@ task directDIA_search_and_analyze_single {
 
 task directDIA_search_binned {
     input {
-        # Primary data inputs
-        Array[String] input_file_paths
+        # Primary data inputs - receives ALL files, filters to bin using round-robin
+        Array[File] all_input_files
         Int bin_index
+        Int num_bins
         File fasta_1
 
         # Additional FASTA databases
@@ -621,7 +558,7 @@ task directDIA_search_binned {
         # Resource parameters
         Int cpu
         Int ram_gb
-        Float bin_size_gb
+        Float total_size_gb
         Int disk_size_multiplier
 
         # Operational parameters
@@ -645,25 +582,21 @@ task directDIA_search_binned {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Manual localization: Download files from GCS
-        echo "Starting manual download of input files from GCS..."
-
-        # Write GCS paths to a file
-        cat <<'EOF' > download_list.txt
-~{sep="\n" input_file_paths}
-EOF
-
-        # Download each file using gcloud storage cp
-        file_count=0
-        while IFS= read -r gcs_path; do
-            if [ -n "$gcs_path" ]; then
-                echo "Downloading: $gcs_path"
-                gcloud storage cp "$gcs_path" "${input_dir}/"
-                ((file_count++))
+        # Select files for this bin using round-robin distribution
+        echo "Selecting files for bin ~{bin_index} of ~{num_bins}..."
+        file_idx=0
+        selected_count=0
+        while IFS= read -r input_file; do
+            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
+                if [ $((file_idx % ~{num_bins})) -eq ~{bin_index} ]; then
+                    ln -sf "${input_file}" "${input_dir}/"
+                    ((selected_count++))
+                fi
+                ((file_idx++))
             fi
-        done < download_list.txt
+        done < ~{write_lines(all_input_files)}
 
-        echo "Manual download complete. Downloaded ${file_count} files."
+        echo "Selected ${selected_count} files for this bin."
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
@@ -735,7 +668,7 @@ EOF
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier) + 50} HDD"
+        disks: "local-disk ~{ceil(total_size_gb * disk_size_multiplier / num_bins) + 100} HDD"
         preemptible: n_preemptible
     }
 }
@@ -869,11 +802,12 @@ task combine_archives {
 
 task dia_analysis_binned {
     input {
-        # Primary data inputs
+        # Primary data inputs - receives ALL files, filters to bin using round-robin
         String experiment_name
-        Array[String] input_file_paths
+        Array[File] all_input_files
         File search_archive
         Int bin_index
+        Int num_bins
         File fasta_1
 
         # Additional FASTA databases
@@ -890,7 +824,7 @@ task dia_analysis_binned {
         # Resource parameters
         Int cpu
         Int ram_gb
-        Float bin_size_gb
+        Float total_size_gb
         Int disk_size_multiplier
 
         # Operational parameters
@@ -911,31 +845,26 @@ task dia_analysis_binned {
         tmp_dir="${cromwell_root}/work_dia_temp"
         mkdir -p "${tmp_dir}"
 
-        # Manual localization: Download files from GCS
-        echo "Starting manual download of input files from GCS..."
-
-        # Write GCS paths to a file
-        cat <<'EOF' > download_list.txt
-~{sep="\n" input_file_paths}
-EOF
-
-        # Download each file using gcloud storage cp
-        file_count=0
-        while IFS= read -r gcs_path; do
-            if [ -n "$gcs_path" ]; then
-                echo "Downloading: $gcs_path"
-                gcloud storage cp "$gcs_path" "${input_dir}/"
-                ((file_count++))
+        # Select files for this bin using round-robin distribution
+        echo "Selecting files for bin ~{bin_index} of ~{num_bins}..."
+        file_idx=0
+        selected_count=0
+        while IFS= read -r input_file; do
+            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
+                if [ $((file_idx % ~{num_bins})) -eq ~{bin_index} ]; then
+                    ln -sf "${input_file}" "${input_dir}/"
+                    ((selected_count++))
+                fi
+                ((file_idx++))
             fi
-        done < download_list.txt
+        done < ~{write_lines(all_input_files)}
 
-        echo "Manual download complete. Downloaded ${file_count} files."
+        echo "Selected ${selected_count} files for this bin."
 
-                # Import enzyme database if provided
+        # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{
-                enzyme_database}"
+            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
         spectronaut diaanalysis \
@@ -1000,7 +929,7 @@ EOF
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier) + 50} HDD"
+        disks: "local-disk ~{ceil(total_size_gb * disk_size_multiplier / num_bins) + 100} HDD"
         preemptible: n_preemptible
     }
 }
