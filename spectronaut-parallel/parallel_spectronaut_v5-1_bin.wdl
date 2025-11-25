@@ -246,6 +246,7 @@ task list_files {
         gcloud storage ls "~{gcs_path}" > "${raw_listing}"
 
         # Remove totals, trim trailing slashes, empty lines, filter out directory itself, unique
+        # IMPORTANT: sort -u ensures deterministic file ordering for consistent round-robin distribution across reruns
         grep -v 'TOTAL:' "${raw_listing}" | \
             sed 's:/*$::' | \
             sed '/^[[:space:]]*$/d' | \
