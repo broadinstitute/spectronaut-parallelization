@@ -539,11 +539,11 @@ task directDIA_search_and_analyze_single {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all input files
-        echo "Copying input files..."
+        # Symlink all input files (saves disk space)
+        echo "Symlinking input files..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
-                cp "${input_file}" "${input_dir}/"
+                ln -sf "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -665,11 +665,11 @@ task directDIA_search_binned {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all files to input directory
-        echo "Copying files to the input directory..."
+        # Symlink all files to input directory (saves 50% disk space)
+        echo "Symlinking files to the input directory..."
         while IFS= read -r htrms_file; do
             if [ -n "${htrms_file}" ]; then
-                cp "${htrms_file}" "${input_dir}/"
+                ln -sf "${htrms_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -838,10 +838,10 @@ task combine_archives {
         work_archives="${cromwell_root}/work_archives"
         mkdir -p "${work_archives}"
 
-        echo "Copying archives for merging..."
+        echo "Symlinking archives for merging..."
         while IFS= read -r archive; do
             if [ -n "${archive}" ]; then
-                cp "${archive}" "${work_archives}/"
+                ln -sf "${archive}" "${work_archives}/"
             fi
         done < ~{write_lines(input_archives)}
 
@@ -945,11 +945,11 @@ task dia_analysis_binned {
         tmp_dir="${cromwell_root}/work_dia_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all HTRMS files to input directory
-        echo "Copying iles..."
+        # Symlink all HTRMS files to input directory (saves disk space)
+        echo "Symlinking files..."
         while IFS= read -r htrms_file; do
             if [ -n "${htrms_file}" ] && [ -f "${htrms_file}" ]; then
-                cp "${htrms_file}" "${input_dir}/"
+                ln -sf "${htrms_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -1066,10 +1066,10 @@ task sne_merge {
         sne_dir="${cromwell_root}/work_snes"
         mkdir -p "${sne_dir}"
 
-        echo "Copying SNE files for merging..."
+        echo "Symlinking SNE files for merging..."
         while IFS= read -r sne_file; do
             if [ -n "${sne_file}" ]; then
-                cp "${sne_file}" "${sne_dir}/"
+                ln -sf "${sne_file}" "${sne_dir}/"
             fi
         done < ~{write_lines(sne_files)}
 
