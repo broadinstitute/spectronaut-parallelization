@@ -120,7 +120,7 @@ workflow parallel_spectronaut {
     }
 
     # Pool all converted/downloaded files
-    Array[File] all_converted_files = download_and_convert_single.output_file
+    Array[String] all_converted_files = download_and_convert_single.output_file_path
     Array[Float] file_sizes_gb = download_and_convert_single.file_size_gb
 
     # Calculate total size for disk allocation
@@ -157,12 +157,8 @@ workflow parallel_spectronaut {
 
     if (actual_num_vms > 1) {
         # PHASE 5: Create bins for parallel processing
-        call write_array_to_file { input:
-            file_paths = all_converted_files,
-        }
-
         call create_bins_from_file { input:
-            file_paths_file = write_array_to_file.output_file,
+            file_paths = all_converted_files,
             num_bins = actual_num_vms,
         }
 
@@ -337,23 +333,21 @@ task download_and_convert_single {
         set -euo pipefail
 
         cromwell_root=$(pwd)
-
-        # Download file from GCS
-        echo "Downloading file: ~{file_path}"
-        gcloud storage cp "~{file_path}" "${cromwell_root}/"
-
         filename=$(basename "~{file_path}")
-        downloaded_file="${cromwell_root}/${filename}"
 
-        if [ ! -f "${downloaded_file}" ]; then
-            echo "ERROR: Failed to download file" >&2
-            exit 1
-        fi
-
-        # Conditionally convert to HTRMS
+        # LOGIC BRANCH: Only download if we actually need to convert
         if [ "~{do_conversion}" = "true" ]; then
-            echo "Converting to HTRMS..."
+            echo "Conversion requested. Downloading file..."
+            gcloud storage cp "~{file_path}" "${cromwell_root}/"
 
+            downloaded_file="${cromwell_root}/${filename}"
+
+            if [ ! -f "${downloaded_file}" ]; then
+                echo "ERROR: Failed to download file" >&2
+                exit 1
+            fi
+
+            # Create directories for conversion
             input_dir="${cromwell_root}/work_input"
             mkdir -p "${input_dir}"
             mv "${downloaded_file}" "${input_dir}/"
@@ -364,6 +358,7 @@ task download_and_convert_single {
             tmp_dir="${cromwell_root}/sn_temp"
             mkdir -p "${tmp_dir}"
 
+            # Run conversion
             spectronaut -convert \
                 -i "${input_dir}" \
                 -o "${output_dir}" \
@@ -379,39 +374,58 @@ task download_and_convert_single {
 
             mv "${htrms_file}" "${cromwell_root}/"
             output_file=$(basename "${htrms_file}")
-        else
-            echo "Skipping conversion, using raw file"
-            output_file="${filename}"
-        fi
 
-        # Calculate file size in GB and write output file path
-        echo "Calculating file size..."
-        file_size_bytes=$(du -b "${cromwell_root}/${output_file}" | awk '{print $1}')
-        file_size_gb=$(awk "BEGIN {printf \"%.2f\", ${file_size_bytes} / (1024^3)}")
-        echo "${file_size_gb}" > "${cromwell_root}/file_size_gb.txt"
-        echo "${output_file}" > "${cromwell_root}/output_filename.txt"
-        echo "File size: ${file_size_gb} GB"
-        echo "Output file: ${output_file}"
+            # Calculate size of the converted file
+            file_size_bytes=$(du -b "${cromwell_root}/${output_file}" | awk '{print $1}')
+            file_size_gb=$(awk "BEGIN {printf \"%.2f\", ${file_size_bytes} / (1024^3)}")
+
+            echo "${output_file}" > output_filename.txt
+            echo "${file_size_gb}" > file_size_gb.txt
+
+            echo "File size: ${file_size_gb} GB"
+            echo "Output file: ${output_file}"
+
+        else
+            echo "No conversion requested. Fetching metadata only..."
+
+            # OPTIMIZATION: Get size from GCS without downloading!
+            # Uses gcloud storage ls --json to get size in bytes
+            file_size_bytes=$(gcloud storage ls --json "~{file_path}" | grep '"size":' | head -n1 | awk -F': ' '{print $2}' | sed 's/[",]//g')
+
+            if [ -z "$file_size_bytes" ]; then
+                echo "ERROR: Could not fetch file size from GCS" >&2
+                exit 1
+            fi
+
+            file_size_gb=$(awk "BEGIN {printf \"%.2f\", ${file_size_bytes} / (1024^3)}")
+
+            # Return the GCS path (since we didn't download/convert)
+            echo "~{file_path}" > output_filename.txt
+            echo "${file_size_gb}" > file_size_gb.txt
+
+            echo "File size: ${file_size_gb} GB (from metadata)"
+            echo "File path: ~{file_path}"
+        fi
     >>>
 
     output {
-        File output_file = read_string("output_filename.txt")
+        String output_file_path = read_string("output_filename.txt")
         Float file_size_gb = read_float("file_size_gb.txt")
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.3"
-        cpu: 16
-        memory: "32GB"
-        bootDiskSizeGb: 64
-        disks: "local-disk 500 HDD"
+        docker: if do_conversion then "cameronlian/panoply-spectronaut:v20.3" else "google/cloud-sdk:slim"
+        cpu: if do_conversion then 16 else 2
+        memory: if do_conversion then "32GB" else "4GB"
+        bootDiskSizeGb: if do_conversion then 64 else 10
+        disks: "local-disk " + (if do_conversion then "500" else "20") + " HDD"
         preemptible: n_preemptible
     }
 }
 
 task create_bins_from_file {
     input {
-        File file_paths_file
+        Array[String] file_paths
         Int num_bins
     }
 
@@ -419,8 +433,8 @@ task create_bins_from_file {
                 python3 <<CODE
 import json
 
-# Read file paths from file
-with open("~{file_paths_file}") as f:
+# Read file paths from WDL's write_lines() output
+with open("~{write_lines(file_paths)}") as f:
     files = [line.strip() for line in f if line.strip()]
 
 num_bins = ~{num_bins}
@@ -721,7 +735,7 @@ EOF
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
+        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier) + 50} HDD"
         preemptible: n_preemptible
     }
 }
@@ -761,32 +775,6 @@ task sum_floats {
         memory: "8GB"
         bootDiskSizeGb: 20
         disks: "local-disk 200 HDD"
-        preemptible: 2
-    }
-}
-
-task write_array_to_file {
-    input {
-        Array[String] file_paths
-    }
-
-    command <<<
-        # Write file paths to output file
-        while IFS= read -r file_path; do
-            echo "${file_path}"
-        done < ~{write_lines(file_paths)} > file_paths.txt
-    >>>
-
-    output {
-        File output_file = "file_paths.txt"
-    }
-
-    runtime {
-        docker: "google/cloud-sdk:slim"
-        cpu: 2
-        memory: "4GB"
-        bootDiskSizeGb: 10
-        disks: "local-disk 50 HDD"
         preemptible: 2
     }
 }
@@ -1012,7 +1000,7 @@ EOF
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
+        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier) + 50} HDD"
         preemptible: n_preemptible
     }
 }
