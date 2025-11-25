@@ -329,6 +329,9 @@ task download_and_convert_single {
 
         cromwell_root=$(pwd)
         filename=$(basename "~{file_path}")
+        # Create output filename: strip extension and add .htrms
+        base_name="${filename%.*}"
+        output_filename="${base_name}.htrms"
 
         if [ "~{do_conversion}" = "true" ]; then
             echo "Conversion requested. Downloading file..."
@@ -359,18 +362,18 @@ task download_and_convert_single {
                 ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
                 -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
 
-            # Move HTRMS file to known output location
+            # Move HTRMS file to output location with original filename
             htrms_file=$(find "${output_dir}" -type f -name "*.htrms" | head -n 1)
             if [ -z "${htrms_file}" ]; then
                 echo "ERROR: No .htrms files produced" >&2
                 exit 1
             fi
-            mv "${htrms_file}" "${cromwell_root}/converted_output"
+            mv "${htrms_file}" "${cromwell_root}/${output_filename}"
 
-            echo "Conversion complete."
+            echo "Conversion complete: ${output_filename}"
 
             # Calculate size of the converted file
-            file_size_bytes=$(stat -c%s "${cromwell_root}/converted_output" 2>/dev/null || stat -f%z "${cromwell_root}/converted_output")
+            file_size_bytes=$(stat -c%s "${cromwell_root}/${output_filename}" 2>/dev/null || stat -f%z "${cromwell_root}/${output_filename}")
             file_size_gb=$(awk "BEGIN {printf \"%.2f\", ${file_size_bytes} / (1024^3)}")
             echo "${file_size_gb}" > file_size_gb.txt
 
@@ -379,26 +382,29 @@ task download_and_convert_single {
         else
             echo "No conversion requested. Downloading file directly..."
 
-            # Download file to known output location
-            gcloud storage cp "~{file_path}" "${cromwell_root}/converted_output"
+            # Download file with original filename
+            gcloud storage cp "~{file_path}" "${cromwell_root}/${output_filename}"
 
-            if [ ! -f "${cromwell_root}/converted_output" ]; then
+            if [ ! -f "${cromwell_root}/${output_filename}" ]; then
                 echo "ERROR: Failed to download file" >&2
                 exit 1
             fi
 
             # Calculate size
-            file_size_bytes=$(stat -c%s "${cromwell_root}/converted_output" 2>/dev/null || stat -f%z "${cromwell_root}/converted_output")
+            file_size_bytes=$(stat -c%s "${cromwell_root}/${output_filename}" 2>/dev/null || stat -f%z "${cromwell_root}/${output_filename}")
             file_size_gb=$(awk "BEGIN {printf \"%.2f\", ${file_size_bytes} / (1024^3)}")
             echo "${file_size_gb}" > file_size_gb.txt
 
             echo "File size: ${file_size_gb} GB"
             echo "Downloaded: ~{file_path}"
         fi
+
+        # Save output filename for WDL output declaration
+        echo "${output_filename}" > output_filename.txt
     >>>
 
     output {
-        File output_file = "converted_output"
+        File output_file = read_string("output_filename.txt")
         Float file_size_gb = read_float("file_size_gb.txt")
     }
 
