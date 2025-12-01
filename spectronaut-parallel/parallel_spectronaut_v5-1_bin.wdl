@@ -323,11 +323,10 @@ task determine_num_vms {
     }
 
     command <<<
-    # Condition 1: Condition 1: Small file count (< 10) - caps at file count
-    # Condition 2: Forced parallelization (1 VM + > 25 files) - overrides to 10 VMs
-    # Condition 3: Default - honors user request
-
         python3 <<CODE
+import os
+
+cromwell_root = os.getcwd()
 requested = ~{requested_num_vms}
 num_files = ~{num_files}
 
@@ -335,20 +334,22 @@ num_files = ~{num_files}
 if num_files < 10:
     actual = num_files
     message = f"INFO: Setting num_vms={actual} (number of input files) because total files ({num_files}) < 10"
+
 # Condition (ii): if user set num_vms=1 but has >25 files, override to 10
 elif requested == 1 and num_files > 25:
     actual = 10
     message = f"WARNING: Overriding num_vms from 1 to 10 for efficient runtime with {num_files} files (>25 threshold)"
+
 else:
     actual = requested
     message = f"INFO: Using requested num_vms={actual} for {num_files} files"
 
 print(message, flush=True)
 
-with open("actual_num_vms.txt", "w") as f:
+with open(f"{cromwell_root}/actual_num_vms.txt", "w") as f:
     f.write(str(actual))
 
-with open("message.txt", "w") as f:
+with open(f"{cromwell_root}/message.txt", "w") as f:
     f.write(message)
 CODE
     >>>
@@ -377,6 +378,9 @@ task create_bins {
     command <<<
         python3 <<CODE
 import json
+import os
+
+cromwell_root = os.getcwd()
 
 # Read file paths
 file_paths_file = "~{write_lines(file_paths)}"
@@ -396,7 +400,7 @@ for i, file_path in enumerate(files):
     bins[bin_index].append(file_path)
 
 # Write bins to JSON
-with open("bins.json", "w") as f:
+with open(f"{cromwell_root}/bins.json", "w") as f:
     json.dump(bins, f, indent=2)
 
 # Print summary
@@ -457,7 +461,7 @@ task download_binned {
         # Calculate actual size
         total_size_bytes=$(find "${output_dir}" -type f -exec du -b {} + | awk '{sum += $1} END {print sum}')
         actual_size_gb=$(awk "BEGIN {printf \"%.2f\", ${total_size_bytes} / (1024^3)}")
-        echo "${actual_size_gb}" > actual_size_gb.txt
+        echo "${actual_size_gb}" > "${cromwell_root}/actual_size_gb.txt"
 
         echo "Actual size: ${actual_size_gb} GB"
 
@@ -466,7 +470,7 @@ task download_binned {
     >>>
 
     output {
-        Array[File] downloaded_files = glob("*.{raw,d,htrms,wiff,wiff2}")
+        Array[File] downloaded_files = glob("*.{raw,d,htrms}")
         Float actual_size_gb = read_float("actual_size_gb.txt")
     }
 
@@ -533,7 +537,7 @@ task htrms_conversion_binned {
         # Calculate actual HTRMS size
         total_size_bytes=$(find "${cromwell_root}" -type f -name "*.htrms" -exec du -b {} + | awk '{sum += $1} END {print sum}')
         htrms_size_gb=$(awk "BEGIN {printf \"%.2f\", ${total_size_bytes} / (1024^3)}")
-        echo "${htrms_size_gb}" > htrms_size_gb.txt
+        echo "${htrms_size_gb}" > "${cromwell_root}/htrms_size_gb.txt"
 
         echo "Input size: ~{input_size_gb} GB"
         echo "HTRMS size: ${htrms_size_gb} GB"
@@ -575,7 +579,7 @@ task htrms_conversion_binned {
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 128
-        disks: "local-disk ~{ceil(input_size_gb * 5)} HDD"
+        disks: "local-disk 500 HDD"
         preemptible: n_preemptible
     }
 }
@@ -841,6 +845,9 @@ task sum_floats {
     command <<<
                 python3 <<CODE
         import json
+        import os
+
+        cromwell_root = os.getcwd()
 
         # Read values
         values_file = "~{write_json(values)}"
@@ -851,7 +858,7 @@ task sum_floats {
         total = sum(values)
 
         # Write total
-        with open("total.txt", "w") as f:
+        with open(f"{cromwell_root}/total.txt", "w") as f:
             f.write(str(total))
 
         print(f"Sum of {len(values)} values: {total}")
