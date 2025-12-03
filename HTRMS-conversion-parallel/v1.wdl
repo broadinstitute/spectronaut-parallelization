@@ -105,7 +105,7 @@ task htrms_conversion {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 128
