@@ -73,7 +73,7 @@ workflow parallel_spectronaut {
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
         "proteome": 50,
-        "ptm": 100,
+        "ptm": 80,
     }
 
     Map[String, Int] dia_analysis_cpu_presets = {
@@ -86,8 +86,8 @@ workflow parallel_spectronaut {
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
-        "proteome": 16,
-        "ptm": 16,
+        "proteome": 15,
+        "ptm": 15,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
         "proteome": 40,
@@ -1089,7 +1089,7 @@ task directDIA_search_binned {
     >>>
 
     output {
-        File search_archive = "search_archive_bin_~{bin_index}.psar"
+        File search_archive = glob("*.psar")[0]
     }
 
     runtime {
@@ -1468,7 +1468,7 @@ task dia_analysis_binned {
     >>>
 
     output {
-        File sne_file = "~{experiment_name}_bin_~{bin_index}.sne"
+        File sne_file = glob("*.sne")[0]
     }
 
     runtime {
