@@ -1361,10 +1361,10 @@ task dia_analysis_binned {
             exit 1
         fi
 
-        # Move to cromwell root (file is already named with experiment_name and bin_index)
-        mv "${sne_file}" "${cromwell_root}/"
+        # Rename and move to cromwell root with standardized name
+        mv "${sne_file}" "${cromwell_root}/~{experiment_name}_bin_~{bin_index}.sne"
 
-        echo "DIA analysis complete. Generated SNE file: $(basename "${sne_file}")"
+        echo "DIA analysis complete. Generated SNE file: ~{experiment_name}_bin_~{bin_index}.sne"
 
         # ============================================================================
         # Resource Usage Report
