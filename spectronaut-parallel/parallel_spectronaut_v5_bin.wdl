@@ -51,7 +51,7 @@ workflow parallel_spectronaut {
 
         # Preemptible instance settings (0 = non-preemptible, >0 = number of preemptible attempts)
         Int n_preemptible_htrms_conversion = 2  # HTRMS conversion preemptible attempts
-        Int n_preemptible_directDIA_search = 0  # DirectDIA search preemptible attempts
+        Int n_preemptible_directDIA_search = 0  # directDIA search preemptible attempts
         Int n_preemptible_combine_archives = 0  # Archive combining preemptible attempts
         Int n_preemptible_dia_analysis = 0  # DIA analysis preemptible attempts
         Int n_preemptible_combine_sne = 0  # SNE combining preemptible attempts
@@ -217,7 +217,7 @@ workflow parallel_spectronaut {
         # Scatter: Generate search archives for each bin
         scatter (i in range(length(file_bins))) {
 
-            # DirectDIA search for search archive generation
+            # directDIA search for search archive generation
             call directDIA_search_binned { input:
                 input_files = file_bins[i],
                 analysis_schema = search_settings,
@@ -493,7 +493,7 @@ task convert_single_file_htrms {
         String file_path
         Int disk_size_gb
         File? convert_schema
-        Int n_preemptible = 0
+        Int n_preemptible = 2
     }
 
     command <<<
@@ -561,7 +561,7 @@ task convert_single_file_htrms {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: 6
         memory: "16GB"
         bootDiskSizeGb: 50
@@ -623,12 +623,11 @@ task directDIA_single_vm {
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{
-                enzyme_database}"
+            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        # Run DirectDIA search
-        echo "Starting DirectDIA search..."
+        # Run directDIA search
+        echo "Starting directDIA search..."
         spectronaut direct \
             ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
             ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
@@ -654,7 +653,7 @@ task directDIA_single_vm {
             exit 1
         fi
 
-        echo "DirectDIA search complete."
+        echo "directDIA search complete."
         # Memory usage reporting
         echo "=== Memory Usage Report ==="
         # Cgroup V2 (modern)
@@ -689,7 +688,7 @@ task directDIA_single_vm {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -739,8 +738,7 @@ task directDIA_search_binned {
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{
-                enzyme_database}"
+            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
         spectronaut direct \
@@ -801,7 +799,7 @@ task directDIA_search_binned {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -840,8 +838,7 @@ task combine_archives {
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{
-                enzyme_database}"
+            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
         spectronaut lg -se Pulsar \
@@ -889,7 +886,7 @@ task combine_archives {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -939,11 +936,10 @@ task dia_analysis_binned {
             fi
         done < ~{write_lines(input_files)}
 
-                # Import enzyme database if provided
+        # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{
-                enzyme_database}"
+            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
         spectronaut diaanalysis \
@@ -1006,7 +1002,7 @@ task dia_analysis_binned {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1056,12 +1052,11 @@ task combine_sne {
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
             echo "Importing enzyme database..."
-            dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB "~{
-                enzyme_database}"
+            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
         spectronaut manageSNE --merge \
-            -n "~{experiment_name}_merged" \
+            -n "~{experiment_name}" \
             -o "${output_dir}" \
             -d "${sne_dir}" \
             ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
@@ -1114,7 +1109,7 @@ task combine_sne {
     }
 
     runtime {
-        docker: "cameronlian/panoply-spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
