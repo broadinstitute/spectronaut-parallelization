@@ -59,12 +59,12 @@ workflow parallel_spectronaut {
 
     # Compute preset configurations based on experiment_type
     Map[String, Int] directDIA_search_cpu_presets = {
-        "proteome": 70,
-        "ptm": 90,
+        "proteome": 80,
+        "ptm": 100,
     }
     Map[String, Int] directDIA_search_ram_gb_presets = {
-        "proteome": 150,
-        "ptm": 250,
+        "proteome": 90,
+        "ptm": 120,
     }
 
     Map[String, Int] combine_archives_cpu_presets = {
@@ -205,6 +205,7 @@ workflow parallel_spectronaut {
             cpu = directDIA_search_cpu,
             ram_gb = directDIA_search_ram_gb,
             n_preemptible = n_preemptible_directDIA_search,
+            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
     }
 
@@ -231,6 +232,7 @@ workflow parallel_spectronaut {
                 n_preemptible = n_preemptible_directDIA_search,
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
+                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier) + 300,
             }
         }
 
@@ -246,6 +248,7 @@ workflow parallel_spectronaut {
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_archives,
+            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier) + 300,
         }
 
         # Scatter: DIA analysis for each bin against the merged library
@@ -265,6 +268,7 @@ workflow parallel_spectronaut {
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
                 n_preemptible = n_preemptible_dia_analysis,
+                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier) + 300,
             }
         }
 
@@ -286,6 +290,7 @@ workflow parallel_spectronaut {
             disk_size_multiplier = disk_size_multiplier,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
+            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier) + 300,
         }
     }
 
@@ -501,6 +506,20 @@ task convert_single_file_htrms {
 
         cromwell_root=$(pwd)
 
+        # Resource Monitoring Initialization
+        wall_start=$(date +%s%N)  # Nanoseconds since epoch
+
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_start_ns=0
+        fi
+
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
 
@@ -553,6 +572,106 @@ task convert_single_file_htrms {
             echo "ERROR: HTRMS file not found for size calculation" >&2
             exit 1
         fi
+
+        # ============================================================================
+        # Resource Usage Report
+        # ============================================================================
+        echo "==========================================="
+        echo "=== RESOURCE USAGE REPORT ==="
+        echo "==========================================="
+
+        # --- CPU Utilization ---
+        echo ""
+        echo "--- CPU Utilization ---"
+
+        wall_end=$(date +%s%N)
+        wall_elapsed_ns=$((wall_end - wall_start))
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_end_ns=$((cpu_end * 1000))
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_end_ns=0
+        fi
+
+        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
+            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
+            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
+                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
+            allocated_cpus=6
+            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
+                'BEGIN { printf "%.2f", total / cpus }')
+
+            echo "Allocated CPUs: ${allocated_cpus}"
+            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
+            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
+        else
+            echo "CPU utilization data not available"
+        fi
+
+        # --- Memory Usage ---
+        echo ""
+        echo "--- Memory Usage ---"
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "$max_mem_bytes" -gt 0 ]; then
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+            echo "Actual Peak RAM: ${max_mem_gb} GB"
+
+            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
+                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
+                echo "RAM Limit: ${limit_gb} GB"
+                echo "RAM Usage: ${usage_percent}%"
+            fi
+        else
+            echo "Memory usage data not available"
+        fi
+
+        # --- Disk Usage ---
+        echo ""
+        echo "--- Disk Usage ---"
+
+        allocated_disk_gb=~{disk_size_gb}
+        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
+
+        if command -v df >/dev/null 2>&1; then
+            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
+
+            if [ -n "${disk_used_output}" ]; then
+                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
+                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
+                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
+
+                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Disk Usage: ${disk_usage_percent}%"
+            else
+                echo "Could not measure disk usage"
+            fi
+        else
+            echo "df command not available"
+        fi
+
+        echo ""
+        echo "==========================================="
     >>>
 
     output {
@@ -590,12 +709,27 @@ task directDIA_single_vm {
         File? report_schema_3
         File? report_schema_4
         Int n_preemptible = 0
+        Int allocated_disk_gb
     }
 
     command <<<
         set -euo pipefail
 
         cromwell_root=$(pwd)
+
+        # Resource Monitoring Initialization
+        wall_start=$(date +%s%N)  # Nanoseconds since epoch
+
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_start_ns=0
+        fi
 
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
@@ -654,13 +788,57 @@ task directDIA_single_vm {
         fi
 
         echo "directDIA search complete."
-        # Memory usage reporting
-        echo "=== Memory Usage Report ==="
-        # Cgroup V2 (modern)
+
+        # ============================================================================
+        # Resource Usage Report
+        # ============================================================================
+        echo "==========================================="
+        echo "=== RESOURCE USAGE REPORT ==="
+        echo "==========================================="
+
+        # --- CPU Utilization ---
+        echo ""
+        echo "--- CPU Utilization ---"
+
+        wall_end=$(date +%s%N)
+        wall_elapsed_ns=$((wall_end - wall_start))
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_end_ns=$((cpu_end * 1000))
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_end_ns=0
+        fi
+
+        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
+            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
+            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
+                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
+            allocated_cpus=~{cpu}
+            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
+                'BEGIN { printf "%.2f", total / cpus }')
+
+            echo "Allocated CPUs: ${allocated_cpus}"
+            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
+            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
+        else
+            echo "CPU utilization data not available"
+        fi
+
+        # --- Memory Usage ---
+        echo ""
+        echo "--- Memory Usage ---"
+
+        # Cgroup V2
         if [ -f /sys/fs/cgroup/memory.peak ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
             limit_bytes=$(cat /sys/fs/cgroup/memory.max)
-        # Cgroup V1 (legacy)
+        # Cgroup V1
         elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
             limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
@@ -670,17 +848,46 @@ task directDIA_single_vm {
         fi
 
         if [ "$max_mem_bytes" -gt 0 ]; then
-            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
 
             if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
-                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
-                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
+                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
                 echo "RAM Limit: ${limit_gb} GB"
                 echo "RAM Usage: ${usage_percent}%"
             fi
+        else
+            echo "Memory usage data not available"
         fi
-        echo "==========================="
+
+        # --- Disk Usage ---
+        echo ""
+        echo "--- Disk Usage ---"
+
+        allocated_disk_gb=~{allocated_disk_gb}
+        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
+
+        if command -v df >/dev/null 2>&1; then
+            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
+
+            if [ -n "${disk_used_output}" ]; then
+                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
+                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
+                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
+
+                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Disk Usage: ${disk_usage_percent}%"
+            else
+                echo "Could not measure disk usage"
+            fi
+        else
+            echo "df command not available"
+        fi
+
+        echo ""
+        echo "==========================================="
     >>>
 
     output {
@@ -711,12 +918,27 @@ task directDIA_search_binned {
         File? fasta_3
         File? enzyme_database
         Int n_preemptible = 0
+        Int allocated_disk_gb
     }
 
     command <<<
         set -euo pipefail
 
         cromwell_root=$(pwd)
+
+        # Resource Monitoring Initialization
+        wall_start=$(date +%s%N)  # Nanoseconds since epoch
+
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_start_ns=0
+        fi
 
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
@@ -765,13 +987,56 @@ task directDIA_search_binned {
 
         echo "Archive generation complete. Generated ${output_name}"
 
-        # Memory usage reporting
-        echo "=== Memory Usage Report ==="
-        # Cgroup V2 (modern)
+        # ============================================================================
+        # Resource Usage Report
+        # ============================================================================
+        echo "==========================================="
+        echo "=== RESOURCE USAGE REPORT ==="
+        echo "==========================================="
+
+        # --- CPU Utilization ---
+        echo ""
+        echo "--- CPU Utilization ---"
+
+        wall_end=$(date +%s%N)
+        wall_elapsed_ns=$((wall_end - wall_start))
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_end_ns=$((cpu_end * 1000))
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_end_ns=0
+        fi
+
+        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
+            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
+            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
+                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
+            allocated_cpus=~{cpu}
+            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
+                'BEGIN { printf "%.2f", total / cpus }')
+
+            echo "Allocated CPUs: ${allocated_cpus}"
+            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
+            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
+        else
+            echo "CPU utilization data not available"
+        fi
+
+        # --- Memory Usage ---
+        echo ""
+        echo "--- Memory Usage ---"
+
+        # Cgroup V2
         if [ -f /sys/fs/cgroup/memory.peak ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
             limit_bytes=$(cat /sys/fs/cgroup/memory.max)
-        # Cgroup V1 (legacy)
+        # Cgroup V1
         elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
             limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
@@ -781,17 +1046,46 @@ task directDIA_search_binned {
         fi
 
         if [ "$max_mem_bytes" -gt 0 ]; then
-            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
-            
+
             if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
-                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
-                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
+                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
                 echo "RAM Limit: ${limit_gb} GB"
                 echo "RAM Usage: ${usage_percent}%"
             fi
+        else
+            echo "Memory usage data not available"
         fi
-        echo "==========================="
+
+        # --- Disk Usage ---
+        echo ""
+        echo "--- Disk Usage ---"
+
+        allocated_disk_gb=~{allocated_disk_gb}
+        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
+
+        if command -v df >/dev/null 2>&1; then
+            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
+
+            if [ -n "${disk_used_output}" ]; then
+                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
+                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
+                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
+
+                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Disk Usage: ${disk_usage_percent}%"
+            else
+                echo "Could not measure disk usage"
+            fi
+        else
+            echo "df command not available"
+        fi
+
+        echo ""
+        echo "==========================================="
     >>>
 
     output {
@@ -817,12 +1111,28 @@ task combine_archives {
         Int ram_gb
         File? enzyme_database
         Int n_preemptible = 0
+        Int allocated_disk_gb
     }
 
     command <<<
         set -euo pipefail
 
         cromwell_root=$(pwd)
+
+        # Resource Monitoring Initialization
+        wall_start=$(date +%s%N)  # Nanoseconds since epoch
+
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_start_ns=0
+        fi
+
         merged_library="merged_library.kit"
 
         work_archives="${cromwell_root}/work_archives"
@@ -852,13 +1162,57 @@ task combine_archives {
         fi
 
         echo "Archive merging complete."
-        # Memory usage reporting
-        echo "=== Memory Usage Report ==="
-        # Cgroup V2 (modern)
+
+        # ============================================================================
+        # Resource Usage Report
+        # ============================================================================
+        echo "==========================================="
+        echo "=== RESOURCE USAGE REPORT ==="
+        echo "==========================================="
+
+        # --- CPU Utilization ---
+        echo ""
+        echo "--- CPU Utilization ---"
+
+        wall_end=$(date +%s%N)
+        wall_elapsed_ns=$((wall_end - wall_start))
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_end_ns=$((cpu_end * 1000))
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_end_ns=0
+        fi
+
+        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
+            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
+            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
+                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
+            allocated_cpus=~{cpu}
+            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
+                'BEGIN { printf "%.2f", total / cpus }')
+
+            echo "Allocated CPUs: ${allocated_cpus}"
+            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
+            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
+        else
+            echo "CPU utilization data not available"
+        fi
+
+        # --- Memory Usage ---
+        echo ""
+        echo "--- Memory Usage ---"
+
+        # Cgroup V2
         if [ -f /sys/fs/cgroup/memory.peak ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
             limit_bytes=$(cat /sys/fs/cgroup/memory.max)
-        # Cgroup V1 (legacy)
+        # Cgroup V1
         elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
             limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
@@ -868,17 +1222,46 @@ task combine_archives {
         fi
 
         if [ "$max_mem_bytes" -gt 0 ]; then
-            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
-            
+
             if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
-                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
-                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
+                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
                 echo "RAM Limit: ${limit_gb} GB"
                 echo "RAM Usage: ${usage_percent}%"
             fi
+        else
+            echo "Memory usage data not available"
         fi
-        echo "==========================="
+
+        # --- Disk Usage ---
+        echo ""
+        echo "--- Disk Usage ---"
+
+        allocated_disk_gb=~{allocated_disk_gb}
+        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
+
+        if command -v df >/dev/null 2>&1; then
+            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
+
+            if [ -n "${disk_used_output}" ]; then
+                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
+                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
+                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
+
+                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Disk Usage: ${disk_usage_percent}%"
+            else
+                echo "Could not measure disk usage"
+            fi
+        else
+            echo "df command not available"
+        fi
+
+        echo ""
+        echo "==========================================="
     >>>
 
     output {
@@ -912,12 +1295,27 @@ task dia_analysis_binned {
         File? fasta_3
         File? json_settings
         Int n_preemptible = 0
+        Int allocated_disk_gb
     }
 
     command <<<
         set -euo pipefail
 
         cromwell_root=$(pwd)
+
+        # Resource Monitoring Initialization
+        wall_start=$(date +%s%N)  # Nanoseconds since epoch
+
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_start_ns=0
+        fi
 
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
@@ -968,13 +1366,56 @@ task dia_analysis_binned {
 
         echo "DIA analysis complete. Generated SNE file: $(basename "${sne_file}")"
 
-        # Memory usage reporting
-        echo "=== Memory Usage Report ==="
-        # Cgroup V2 (modern)
+        # ============================================================================
+        # Resource Usage Report
+        # ============================================================================
+        echo "==========================================="
+        echo "=== RESOURCE USAGE REPORT ==="
+        echo "==========================================="
+
+        # --- CPU Utilization ---
+        echo ""
+        echo "--- CPU Utilization ---"
+
+        wall_end=$(date +%s%N)
+        wall_elapsed_ns=$((wall_end - wall_start))
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_end_ns=$((cpu_end * 1000))
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_end_ns=0
+        fi
+
+        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
+            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
+            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
+                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
+            allocated_cpus=~{cpu}
+            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
+                'BEGIN { printf "%.2f", total / cpus }')
+
+            echo "Allocated CPUs: ${allocated_cpus}"
+            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
+            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
+        else
+            echo "CPU utilization data not available"
+        fi
+
+        # --- Memory Usage ---
+        echo ""
+        echo "--- Memory Usage ---"
+
+        # Cgroup V2
         if [ -f /sys/fs/cgroup/memory.peak ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
             limit_bytes=$(cat /sys/fs/cgroup/memory.max)
-        # Cgroup V1 (legacy)
+        # Cgroup V1
         elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
             limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
@@ -984,17 +1425,46 @@ task dia_analysis_binned {
         fi
 
         if [ "$max_mem_bytes" -gt 0 ]; then
-            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
-            
+
             if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
-                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
-                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
+                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
                 echo "RAM Limit: ${limit_gb} GB"
                 echo "RAM Usage: ${usage_percent}%"
             fi
+        else
+            echo "Memory usage data not available"
         fi
-        echo "==========================="
+
+        # --- Disk Usage ---
+        echo ""
+        echo "--- Disk Usage ---"
+
+        allocated_disk_gb=~{allocated_disk_gb}
+        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
+
+        if command -v df >/dev/null 2>&1; then
+            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
+
+            if [ -n "${disk_used_output}" ]; then
+                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
+                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
+                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
+
+                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Disk Usage: ${disk_usage_percent}%"
+            else
+                echo "Could not measure disk usage"
+            fi
+        else
+            echo "df command not available"
+        fi
+
+        echo ""
+        echo "==========================================="
     >>>
 
     output {
@@ -1027,12 +1497,27 @@ task combine_sne {
         File? analysis_schema
         File? enzyme_database
         Int n_preemptible = 0
+        Int allocated_disk_gb
     }
 
     command <<<
         set -euo pipefail
 
         cromwell_root=$(pwd)
+
+        # Resource Monitoring Initialization
+        wall_start=$(date +%s%N)  # Nanoseconds since epoch
+
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_start_ns=0
+        fi
 
         output_dir="${cromwell_root}/out_combine"
         output_zip="${cromwell_root}/spectronaut_output.zip"
@@ -1075,13 +1560,57 @@ task combine_sne {
         fi
 
         echo "SNE merging complete."
-        # Memory usage reporting
-        echo "=== Memory Usage Report ==="
-        # Cgroup V2 (modern)
+
+        # ============================================================================
+        # Resource Usage Report
+        # ============================================================================
+        echo "==========================================="
+        echo "=== RESOURCE USAGE REPORT ==="
+        echo "==========================================="
+
+        # --- CPU Utilization ---
+        echo ""
+        echo "--- CPU Utilization ---"
+
+        wall_end=$(date +%s%N)
+        wall_elapsed_ns=$((wall_end - wall_start))
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_end_ns=$((cpu_end * 1000))
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_end_ns=0
+        fi
+
+        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
+            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
+            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
+                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
+            allocated_cpus=~{cpu}
+            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
+                'BEGIN { printf "%.2f", total / cpus }')
+
+            echo "Allocated CPUs: ${allocated_cpus}"
+            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
+            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
+        else
+            echo "CPU utilization data not available"
+        fi
+
+        # --- Memory Usage ---
+        echo ""
+        echo "--- Memory Usage ---"
+
+        # Cgroup V2
         if [ -f /sys/fs/cgroup/memory.peak ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
             limit_bytes=$(cat /sys/fs/cgroup/memory.max)
-        # Cgroup V1 (legacy)
+        # Cgroup V1
         elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
             max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
             limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
@@ -1091,17 +1620,46 @@ task combine_sne {
         fi
 
         if [ "$max_mem_bytes" -gt 0 ]; then
-            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { print val / (1024^3) }')
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
-            
+
             if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
-                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { print val / (1024^3) }')
-                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" 'BEGIN { print (max / lim) * 100 }')
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
+                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
                 echo "RAM Limit: ${limit_gb} GB"
                 echo "RAM Usage: ${usage_percent}%"
             fi
+        else
+            echo "Memory usage data not available"
         fi
-        echo "==========================="
+
+        # --- Disk Usage ---
+        echo ""
+        echo "--- Disk Usage ---"
+
+        allocated_disk_gb=~{allocated_disk_gb}
+        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
+
+        if command -v df >/dev/null 2>&1; then
+            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
+
+            if [ -n "${disk_used_output}" ]; then
+                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
+                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
+                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
+
+                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Disk Usage: ${disk_usage_percent}%"
+            else
+                echo "Could not measure disk usage"
+            fi
+        else
+            echo "df command not available"
+        fi
+
+        echo ""
+        echo "==========================================="
     >>>
 
     output {
