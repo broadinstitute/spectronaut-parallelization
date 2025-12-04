@@ -280,3 +280,4 @@ No need to set project ID before transfers between buckets.
 - Author: C. Lian, D. R. Mani
 - Email: proteogenomics@broadinstitute.org, glian@broadinstitute.org
 - after editing any WDL file, use dos2unix <file> command to converting that WDL file into unix format
+- Workflow scripts in this project are to be run on Terra (Cromwell file management environment on Google Cloud)
