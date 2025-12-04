@@ -9,7 +9,10 @@
       "Bash(command -v:*)",
       "WebFetch(domain:cromwell.readthedocs.io)",
       "WebFetch(domain:support.terra.bio)",
-      "WebFetch(domain:docs.cloud.google.com)"
+      "WebFetch(domain:docs.cloud.google.com)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []
