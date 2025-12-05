@@ -46,7 +46,7 @@ workflow parallel_spectronaut {
         # ============================================================================
         # Resource Configuration
         # ============================================================================
-        Int disk_size_multiplier = 4  # Multiplier for dynamic disk size calculation
+        Int disk_size_multiplier = 3  # Multiplier for dynamic disk size calculation
         Int htrms_conversion_disk_gb = 300  # Fixed disk size per VM for HTRMS conversion
 
         # Preemptible instance settings (0 = non-preemptible, >0 = number of preemptible attempts)
@@ -498,7 +498,7 @@ task convert_single_file_htrms {
         String file_path
         Int disk_size_gb
         File? convert_schema
-        Int n_preemptible = 2
+        Int n_preemptible
     }
 
     command <<<
@@ -708,7 +708,7 @@ task directDIA_single_vm {
         File? report_schema_2
         File? report_schema_3
         File? report_schema_4
-        Int n_preemptible = 0
+        Int n_preemptible
         Int allocated_disk_gb
     }
 
@@ -917,7 +917,7 @@ task directDIA_search_binned {
         File? fasta_2
         File? fasta_3
         File? enzyme_database
-        Int n_preemptible = 0
+        Int n_preemptible
         Int allocated_disk_gb
     }
 
@@ -1110,7 +1110,7 @@ task combine_archives {
         Int cpu
         Int ram_gb
         File? enzyme_database
-        Int n_preemptible = 0
+        Int n_preemptible
         Int allocated_disk_gb
     }
 
@@ -1294,7 +1294,7 @@ task dia_analysis_binned {
         File? fasta_2
         File? fasta_3
         File? json_settings
-        Int n_preemptible = 0
+        Int n_preemptible
         Int allocated_disk_gb
     }
 
@@ -1496,7 +1496,7 @@ task combine_sne {
         File? report_schema_4
         File? analysis_schema
         File? enzyme_database
-        Int n_preemptible = 0
+        Int n_preemptible
         Int allocated_disk_gb
     }
 
