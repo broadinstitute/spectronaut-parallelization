@@ -47,7 +47,7 @@ workflow parallel_spectronaut {
         # Resource Configuration
         # ============================================================================
         Int disk_size_multiplier = 3  # Multiplier for dynamic disk size calculation
-        Int htrms_conversion_disk_gb = 300  # Fixed disk size per VM for HTRMS conversion
+        Int htrms_conversion_disk_gb = 100  # Fixed disk size per VM for HTRMS conversion
 
         # Preemptible instance settings (0 = non-preemptible, >0 = number of preemptible attempts)
         Int n_preemptible_htrms_conversion = 2  # HTRMS conversion preemptible attempts
@@ -59,8 +59,8 @@ workflow parallel_spectronaut {
 
     # Compute preset configurations based on experiment_type
     Map[String, Int] directDIA_search_cpu_presets = {
-        "proteome": 80,
-        "ptm": 100,
+        "proteome": 30,
+        "ptm": 40,
     }
     Map[String, Int] directDIA_search_ram_gb_presets = {
         "proteome": 90,
@@ -68,30 +68,30 @@ workflow parallel_spectronaut {
     }
 
     Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 16,
-        "ptm": 16,
+        "proteome": 5,
+        "ptm": 5,
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 50,
+        "proteome": 40,
         "ptm": 80,
     }
 
     Map[String, Int] dia_analysis_cpu_presets = {
-        "proteome": 32,
-        "ptm": 64,
+        "proteome": 15,
+        "ptm": 25,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
         "proteome": 80,
-        "ptm": 150,
+        "ptm": 120,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
-        "proteome": 15,
-        "ptm": 15,
+        "proteome": 4,
+        "ptm": 4,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
         "proteome": 40,
-        "ptm": 80,
+        "ptm": 60,
     }
 
     # Validate experiment_type and fallback to "proteome" if invalid
@@ -213,7 +213,7 @@ workflow parallel_spectronaut {
     if (calculated_num_vms > 1) {
 
         # Calculate approximate size per VM for disk allocation
-        Float bin_size_per_vm = total_input_size_gb / calculated_num_vms + 50
+        Float bin_size_per_vm = total_input_size_gb / calculated_num_vms + 25
 
         # Scatter: Generate search archives for each bin
         scatter (i in range(length(file_bins))) {
@@ -232,7 +232,7 @@ workflow parallel_spectronaut {
                 n_preemptible = n_preemptible_directDIA_search,
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
-                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier) + 300,
+                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
 
@@ -248,7 +248,7 @@ workflow parallel_spectronaut {
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_archives,
-            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier) + 300,
+            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
 
         # Scatter: DIA analysis for each bin against the merged library
@@ -268,7 +268,7 @@ workflow parallel_spectronaut {
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
                 n_preemptible = n_preemptible_dia_analysis,
-                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier) + 300,
+                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
 
@@ -290,7 +290,7 @@ workflow parallel_spectronaut {
             disk_size_multiplier = disk_size_multiplier,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
-            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier) + 300,
+            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
     }
 
@@ -681,8 +681,8 @@ task convert_single_file_htrms {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        cpu: 6
-        memory: "16GB"
+        cpu: 2
+        memory: "18GB"
         bootDiskSizeGb: 50
         disks: "local-disk ~{disk_size_gb} HDD"
         preemptible: n_preemptible
@@ -698,6 +698,7 @@ task directDIA_single_vm {
         Int disk_size_multiplier
         Int cpu
         Int ram_gb
+        Int allocated_disk_gb
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -913,6 +914,7 @@ task directDIA_search_binned {
         Int cpu
         Int ram_gb
         Int bin_index
+        Int allocated_disk_gb
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -1109,6 +1111,7 @@ task combine_archives {
         Int disk_size_multiplier
         Int cpu
         Int ram_gb
+        Int allocated_disk_gb
         File? enzyme_database
         Int n_preemptible
         Int allocated_disk_gb
@@ -1289,6 +1292,7 @@ task dia_analysis_binned {
         Int cpu
         Int ram_gb
         Int bin_index
+        Int allocated_disk_gb
         File? enzyme_database
         File? analysis_schema
         File? fasta_2
@@ -1364,7 +1368,8 @@ task dia_analysis_binned {
         # Rename and move to cromwell root with standardized name
         mv "${sne_file}" "${cromwell_root}/~{experiment_name}_bin_~{bin_index}.sne"
 
-        echo "DIA analysis complete. Generated SNE file: ~{experiment_name}_bin_~{bin_index}.sne"
+        echo "DIA analysis complete. Generated SNE file: ~{experiment_name}_bin_~{
+            bin_index}.sne"
 
         # ============================================================================
         # Resource Usage Report
@@ -1489,6 +1494,7 @@ task combine_sne {
         Int disk_size_multiplier
         Int ram_gb
         Int cpu
+        Int allocated_disk_gb
         File? condition_setup
         File? report_schema_1
         File? report_schema_2
