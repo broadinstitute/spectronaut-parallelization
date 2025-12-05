@@ -167,24 +167,11 @@ workflow parallel_spectronaut {
     ])
 
     # ============================================================================
-    # PHASE II: Intelligent Binning
-    # ============================================================================
-
-    # Bin HTRMS files with sorting and validation
-    call create_bins { input:
-        file_paths = read_lines(write_lines(all_htrms_files)),
-        num_bins = num_vms,
-    }
-
-    Array[Array[File]] file_bins = read_json(create_bins.bins_json)
-    Int calculated_num_vms = create_bins.calculated_num_vms
-
-    # ============================================================================
-    # PHASE III: Conditional Execution - Single VM vs Parallel
+    # PHASE II: Conditional Execution - Single VM vs Parallel
     # ============================================================================
 
     # BRANCH A: Single VM Mode (num_vms == 1)
-    if (calculated_num_vms == 1) {
+    if (num_vms == 1) {
         # Run classic directDIA on all files in one VM
         call directDIA_single_vm { input:
             experiment_name = experiment_name,
@@ -210,7 +197,16 @@ workflow parallel_spectronaut {
     }
 
     # BRANCH B: Parallel Mode (num_vms > 1)
-    if (calculated_num_vms > 1) {
+    if (num_vms > 1) {
+
+        # Bin HTRMS files with sorting and validation
+        call create_bins { input:
+            file_paths = read_lines(write_lines(all_htrms_files)),
+            num_bins = num_vms,
+        }
+
+        Array[Array[File]] file_bins = read_json(create_bins.bins_json)
+        Int calculated_num_vms = create_bins.calculated_num_vms
 
         # Calculate approximate size per VM for disk allocation
         Float bin_size_per_vm = total_input_size_gb / calculated_num_vms + 25
@@ -236,7 +232,9 @@ workflow parallel_spectronaut {
             }
         }
 
-        Array[File] all_archives = directDIA_search_binned.search_archive
+        # Collect all archives from all bins (each bin produces multiple archives)
+        Array[Array[File]] all_archives_nested = directDIA_search_binned.search_archives
+        Array[File] all_archives = flatten(all_archives_nested)
 
         # Combine scattered search archives into one
         # Uses total_input_size_gb for disk estimation instead of summing bin sizes
@@ -965,29 +963,55 @@ task directDIA_search_binned {
             dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        spectronaut direct \
-            -d "${input_dir}" \
-            -fasta "~{fasta_1}" \
-            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
-            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-            -o "${output_dir}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee archive_generation.log
+        # Process each HTRMS file individually
+        echo "Processing files individually for search archive generation..."
+        file_count=0
+        for htrms_file in "${input_dir}"/*.htrms; do
+            if [ ! -f "${htrms_file}" ]; then
+                echo "WARNING: No .htrms files found in ${input_dir}"
+                continue
+            fi
 
-        # Rename the single .psar file with bin_index to ensure uniqueness across shards
-        echo "Moving and renaming search archive with bin_index ~{bin_index}..."
-        psar_file=$(find "${output_dir}" -type f -name "*.psar" | head -n 1)
+            # Extract basename without extension
+            base_name=$(basename "${htrms_file}" .htrms)
 
-        if [ -z "${psar_file}" ] || [ ! -f "${psar_file}" ]; then
-            echo "ERROR: No .psar file produced" >&2
-            exit 1
-        fi
+            # Create individual temp directories
+            file_input_dir="${cromwell_root}/input_${base_name}"
+            file_output_dir="${cromwell_root}/output_${base_name}"
+            file_tmp_dir="${cromwell_root}/temp_${base_name}"
 
-        # Rename to predictable name with bin_index
-        output_name="search_archive_bin_~{bin_index}.psar"
-        mv "${psar_file}" "${cromwell_root}/${output_name}"
+            mkdir -p "${file_input_dir}" "${file_output_dir}" "${file_tmp_dir}"
 
-        echo "Archive generation complete. Generated ${output_name}"
+            # Copy single file
+            cp "${htrms_file}" "${file_input_dir}/"
+
+            echo "Processing ${base_name}..."
+            spectronaut direct \
+                -d "${file_input_dir}" \
+                -fasta "~{fasta_1}" \
+                ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+                ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+                ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+                -o "${file_output_dir}" \
+                -setTemp "${file_tmp_dir}" 2>&1 | tee "archive_${base_name}.log"
+
+            # Find and rename the .psar file
+            psar_file=$(find "${file_output_dir}" -type f -name "*.psar" | head -n 1)
+
+            if [ -z "${psar_file}" ] || [ ! -f "${psar_file}" ]; then
+                echo "ERROR: No .psar file produced for ${base_name}" >&2
+                exit 1
+            fi
+
+            # Move to cromwell root with unique name
+            output_name="search_archive_bin_~{bin_index}_${base_name}.psar"
+            mv "${psar_file}" "${cromwell_root}/${output_name}"
+            echo "Generated ${output_name}"
+
+            file_count=$((file_count + 1))
+        done
+
+        echo "Archive generation complete. Generated ${file_count} search archives for bin ~{bin_index}"
 
         # ============================================================================
         # Resource Usage Report
@@ -1091,7 +1115,7 @@ task directDIA_search_binned {
     >>>
 
     output {
-        File search_archive = glob("*.psar")[0]
+        Array[File] search_archives = glob("search_archive_bin_~{bin_index}_*.psar")
     }
 
     runtime {
