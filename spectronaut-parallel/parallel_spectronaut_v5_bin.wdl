@@ -744,8 +744,8 @@ task directDIA_single_vm {
 
         output_zip="${cromwell_root}/spectronaut_output.zip"
 
-        # Copy all HTRMS files to input directory
-        echo "Copying HTRMS files to input directory..."
+        # Copy all input files to input directory
+        echo "Copying input files to input directory..."
         while IFS= read -r htrms_file; do
             if [ -n "${htrms_file}" ] && [ -f "${htrms_file}" ]; then
                 cp "${htrms_file}" "${input_dir}/"
@@ -753,8 +753,8 @@ task directDIA_single_vm {
         done < ~{write_lines(input_files)}
 
         # Verify files were copied
-        file_count=$(find "${input_dir}" -type f -name "*.htrms" | wc -l)
-        echo "Copied ${file_count} HTRMS files to input directory"
+        file_count=$(find "${input_dir}" -type f | wc -l)
+        echo "Copied ${file_count} files to input directory"
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
@@ -951,8 +951,8 @@ task directDIA_search_binned {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all HTRMS files to input directory
-        echo "Copying HTRMS files..."
+        # Copy all input files to input directory
+        echo "Copying input files..."
         while IFS= read -r htrms_file; do
             if [ -n "${htrms_file}" ]; then
                 cp "${htrms_file}" "${input_dir}/"
@@ -965,17 +965,18 @@ task directDIA_search_binned {
             dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        # Process each HTRMS file individually
+        # Process each file individually for search archive generation
         echo "Processing files individually for search archive generation..."
         file_count=0
-        for htrms_file in "${input_dir}"/*.htrms; do
-            if [ ! -f "${htrms_file}" ]; then
-                echo "ERROR: No .htrms files found in ${input_dir}" >&2
-                exit 1
+        for input_file in "${input_dir}"/*; do
+            # Skip if not a regular file
+            if [ ! -f "${input_file}" ]; then
+                continue
             fi
 
-            # Extract basename without extension
-            base_name=$(basename "${htrms_file}" .htrms)
+            # Extract basename without any extension
+            full_basename=$(basename "${input_file}")
+            base_name="${full_basename%.*}"
 
             # Create individual temp directories
             file_input_dir="${cromwell_root}/input_${base_name}"
@@ -985,7 +986,7 @@ task directDIA_search_binned {
             mkdir -p "${file_input_dir}" "${file_output_dir}" "${file_tmp_dir}"
 
             # Copy single file
-            cp "${htrms_file}" "${file_input_dir}/"
+            cp "${input_file}" "${file_input_dir}/"
 
             echo "Processing ${base_name}..."
             spectronaut direct \
