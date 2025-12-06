@@ -236,7 +236,9 @@ workflow parallel_spectronaut {
             }
         }
 
-        Array[File] all_archives = directDIA_search_binned.search_archive
+        # Collect all archives from all bins (each bin produces multiple archives)
+        Array[Array[File]] all_archives_nested = directDIA_search_binned.search_archives
+        Array[File] all_archives = flatten(all_archives_nested)
 
         # Combine scattered search archives into one
         # Uses total_input_size_gb for disk estimation instead of summing bin sizes
@@ -497,8 +499,8 @@ task convert_single_file_htrms {
     input {
         String file_path
         Int disk_size_gb
-        File? convert_schema
         Int n_preemptible
+        File? convert_schema
     }
 
     command <<<
@@ -699,6 +701,7 @@ task directDIA_single_vm {
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
+        Int n_preemptible
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -709,8 +712,6 @@ task directDIA_single_vm {
         File? report_schema_2
         File? report_schema_3
         File? report_schema_4
-        Int n_preemptible
-        Int allocated_disk_gb
     }
 
     command <<<
@@ -915,12 +916,11 @@ task directDIA_search_binned {
         Int ram_gb
         Int bin_index
         Int allocated_disk_gb
+        Int n_preemptible
         File? analysis_schema
         File? fasta_2
         File? fasta_3
         File? enzyme_database
-        Int n_preemptible
-        Int allocated_disk_gb
     }
 
     command <<<
@@ -965,29 +965,61 @@ task directDIA_search_binned {
             dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        spectronaut direct \
-            -d "${input_dir}" \
-            -fasta "~{fasta_1}" \
-            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
-            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-            -o "${output_dir}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee archive_generation.log
+        # Process each HTRMS file individually
+        echo "Processing files individually for search archive generation..."
+        file_count=0
+        for htrms_file in "${input_dir}"/*.htrms; do
+            if [ ! -f "${htrms_file}" ]; then
+                echo "ERROR: No .htrms files found in ${input_dir}" >&2
+                exit 1
+            fi
 
-        # Rename the single .psar file with bin_index to ensure uniqueness across shards
-        echo "Moving and renaming search archive with bin_index ~{bin_index}..."
-        psar_file=$(find "${output_dir}" -type f -name "*.psar" | head -n 1)
+            # Extract basename without extension
+            base_name=$(basename "${htrms_file}" .htrms)
 
-        if [ -z "${psar_file}" ] || [ ! -f "${psar_file}" ]; then
-            echo "ERROR: No .psar file produced" >&2
+            # Create individual temp directories
+            file_input_dir="${cromwell_root}/input_${base_name}"
+            file_output_dir="${cromwell_root}/output_${base_name}"
+            file_tmp_dir="${cromwell_root}/temp_${base_name}"
+
+            mkdir -p "${file_input_dir}" "${file_output_dir}" "${file_tmp_dir}"
+
+            # Copy single file
+            cp "${htrms_file}" "${file_input_dir}/"
+
+            echo "Processing ${base_name}..."
+            spectronaut direct \
+                -d "${file_input_dir}" \
+                -fasta "~{fasta_1}" \
+                ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+                ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+                ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+                -o "${file_output_dir}" \
+                -setTemp "${file_tmp_dir}" 2>&1 | tee "archive_${base_name}.log"
+
+            # Find and rename the .psar file
+            psar_file=$(find "${file_output_dir}" -type f -name "*.psar" | head -n 1)
+
+            if [ -z "${psar_file}" ] || [ ! -f "${psar_file}" ]; then
+                echo "ERROR: No .psar file produced for ${base_name}" >&2
+                exit 1
+            fi
+
+            # Move to cromwell root with unique name
+            output_name="search_archive_bin_~{bin_index}_${base_name}.psar"
+            mv "${psar_file}" "${cromwell_root}/${output_name}"
+            echo "Generated ${output_name}"
+
+            file_count=$((file_count + 1))
+        done
+
+        if [ "${file_count}" -eq 0 ]; then
+            echo "ERROR: No files were processed successfully" >&2
             exit 1
         fi
 
-        # Rename to predictable name with bin_index
-        output_name="search_archive_bin_~{bin_index}.psar"
-        mv "${psar_file}" "${cromwell_root}/${output_name}"
-
-        echo "Archive generation complete. Generated ${output_name}"
+        echo "Archive generation complete. Generated ${file_count} search archives for bin ~{
+            bin_index}"
 
         # ============================================================================
         # Resource Usage Report
@@ -1091,7 +1123,7 @@ task directDIA_search_binned {
     >>>
 
     output {
-        File search_archive = glob("*.psar")[0]
+        Array[File] search_archives = glob("search_archive_bin_~{bin_index}_*.psar")
     }
 
     runtime {
@@ -1112,9 +1144,8 @@ task combine_archives {
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
-        File? enzyme_database
         Int n_preemptible
-        Int allocated_disk_gb
+        File? enzyme_database
     }
 
     command <<<
@@ -1293,13 +1324,12 @@ task dia_analysis_binned {
         Int ram_gb
         Int bin_index
         Int allocated_disk_gb
+        Int n_preemptible
         File? enzyme_database
         File? analysis_schema
         File? fasta_2
         File? fasta_3
         File? json_settings
-        Int n_preemptible
-        Int allocated_disk_gb
     }
 
     command <<<
@@ -1495,6 +1525,7 @@ task combine_sne {
         Int ram_gb
         Int cpu
         Int allocated_disk_gb
+        Int n_preemptible
         File? condition_setup
         File? report_schema_1
         File? report_schema_2
@@ -1502,8 +1533,6 @@ task combine_sne {
         File? report_schema_4
         File? analysis_schema
         File? enzyme_database
-        Int n_preemptible
-        Int allocated_disk_gb
     }
 
     command <<<
