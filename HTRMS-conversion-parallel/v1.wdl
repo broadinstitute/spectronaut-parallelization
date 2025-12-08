@@ -40,6 +40,7 @@ task list_files {
         # Clean up paths in the raw listing
         # Remove trailing slashes (for timsTOF .d files) and empty lines 
         grep -v 'TOTAL:' "${raw_listing}" | \
+            grep -E '\.(raw|d)/?$' | \
             sed 's:/*$::' | \
             sed '/^[[:space:]]*$/d' | \
             sort -u > "${cleaned_listing}"
