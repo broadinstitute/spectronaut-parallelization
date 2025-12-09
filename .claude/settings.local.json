@@ -12,7 +12,8 @@
       "WebFetch(domain:docs.cloud.google.com)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "mcp__ide__getDiagnostics"
     ],
     "deny": [],
     "ask": []
