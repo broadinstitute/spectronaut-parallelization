@@ -362,6 +362,12 @@ task create_bins {
 
         num_bins = ~{num_bins}
 
+        # Cap num_bins at 50 if user requested more than 100
+        if num_bins > 100:
+            print(f"WARNING: Requested {num_bins} VMs, which exceeds maximum of 100")
+            print(f"Reducing num_bins to 50 for resource optimization")
+            num_bins = 50
+
         # Validate num_bins
         if num_bins < 1:
             raise ValueError(f"num_bins must be at least 1, got {num_bins}")
@@ -377,6 +383,18 @@ task create_bins {
         if actual_bins < num_bins:
             print(f"WARNING: Requested {num_bins} bins, but only {len(files)} files available")
             print(f"Setting actual_bins = {actual_bins}")
+
+        # Safety check: Cap actual_bins at 50 if it exceeds 100
+        if actual_bins > 100:
+            print(f"WARNING: Calculated {actual_bins} bins, which exceeds maximum of 100")
+            print(f"Reducing actual_bins to 50 for resource optimization")
+            actual_bins = 50
+
+        # Efficiency check: Force parallelization if user requested 1 VM for > 36 files
+        if num_bins == 1 and len(files) > 36:
+            print(f"WARNING: Requested 1 VM for {len(files)} files (> 36)")
+            print(f"Setting actual_bins to 10 for efficient parallel analysis")
+            actual_bins = 10
 
         # Create bins using round-robin distribution
         bins = [[] for _ in range(actual_bins)]
