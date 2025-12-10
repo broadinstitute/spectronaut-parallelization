@@ -114,7 +114,7 @@ workflow parallel_spectronaut {
     Int combine_sne_ram_gb = combine_sne_ram_gb_presets[validated_experiment_type]
 
     # ============================================================================
-    # PHASE I: Discovery and Universal HTRMS Conversion (1 file per VM)
+    # PHASE I: Discovery and Optional HTRMS Conversion (1 file per VM)
     # ============================================================================
 
     # List all raw files in the input directory
@@ -140,12 +140,12 @@ workflow parallel_spectronaut {
         }
 
         # Gather converted files and their sizes
-        Array[File] converted_htrms_files = convert_single_file_htrms.htrms_file
-        Array[Float] converted_htrms_sizes = convert_single_file_htrms.htrms_size_gb
+        Array[File] converted_files = convert_single_file_htrms.htrms_file
+        Array[Float] converted_file_sizes = convert_single_file_htrms.htrms_size_gb
 
-        # Sum all individual HTRMS sizes
-        call sum_floats as sum_htrms_sizes { input:
-            values = converted_htrms_sizes,
+        # Sum all individual converted file sizes
+        call sum_floats as sum_converted_sizes { input:
+            values = converted_file_sizes,
         }
     }
 
@@ -157,12 +157,12 @@ workflow parallel_spectronaut {
     }
 
     # Select appropriate file array and total size based on path
-    Array[File] all_htrms_files = select_first([
-        converted_htrms_files,
+    Array[File] all_input_files = select_first([
+        converted_files,
         read_lines(list_files.file_list),
     ])
     Float total_input_size_gb = select_first([
-        sum_htrms_sizes.total,
+        sum_converted_sizes.total,
         calculate_directory_size_gcs.total_size_gb,
     ])
 
@@ -170,9 +170,9 @@ workflow parallel_spectronaut {
     # PHASE II: Intelligent Binning
     # ============================================================================
 
-    # Bin HTRMS files with sorting and validation
+    # Bin input files with sorting and validation
     call create_bins { input:
-        file_paths = read_lines(write_lines(all_htrms_files)),
+        file_paths = read_lines(write_lines(all_input_files)),
         num_bins = num_vms,
     }
 
@@ -188,7 +188,7 @@ workflow parallel_spectronaut {
         # Run classic directDIA on all files in one VM
         call directDIA_single_vm { input:
             experiment_name = experiment_name,
-            input_files = all_htrms_files,
+            input_files = all_input_files,
             total_size_gb = total_input_size_gb,
             disk_size_multiplier = disk_size_multiplier,
             analysis_schema = search_settings,
@@ -274,7 +274,8 @@ workflow parallel_spectronaut {
             }
         }
 
-        Array[File] all_sne = dia_analysis_binned.sne_file
+        Array[Array[File]] all_sne_nested = dia_analysis_binned.sne_files
+        Array[File] all_sne = flatten(all_sne_nested)
 
         # Combine scattered SNE files and generate reports
         call combine_sne { input:
@@ -374,7 +375,7 @@ task create_bins {
 
         # Files pre-sorted by list_files task (line 290: sort -u)
         # Order preserved through scatter-gather (lines 103-113)
-        print(f"Processing {len(files)} pre-sorted HTRMS files")
+        print(f"Processing {len(files)} pre-sorted input files")
 
         # Calculate actual number of bins
         # Cannot have more bins than files
@@ -764,9 +765,9 @@ task directDIA_single_vm {
 
         # Copy all input files to input directory
         echo "Copying input files to input directory..."
-        while IFS= read -r htrms_file; do
-            if [ -n "${htrms_file}" ] && [ -f "${htrms_file}" ]; then
-                cp "${htrms_file}" "${input_dir}/"
+        while IFS= read -r input_file; do
+            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
+                cp "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -971,9 +972,9 @@ task directDIA_search_binned {
 
         # Copy all input files to input directory
         echo "Copying input files..."
-        while IFS= read -r htrms_file; do
-            if [ -n "${htrms_file}" ]; then
-                cp "${htrms_file}" "${input_dir}/"
+        while IFS= read -r input_file; do
+            if [ -n "${input_file}" ]; then
+                cp "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -1379,11 +1380,11 @@ task dia_analysis_binned {
         tmp_dir="${cromwell_root}/work_dia_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all HTRMS files to input directory
-        echo "Copying HTRMS files..."
-        while IFS= read -r htrms_file; do
-            if [ -n "${htrms_file}" ] && [ -f "${htrms_file}" ]; then
-                cp "${htrms_file}" "${input_dir}/"
+        # Copy all input files to input directory
+        echo "Copying input files..."
+        while IFS= read -r input_file; do
+            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
+                cp "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -1393,32 +1394,65 @@ task dia_analysis_binned {
             dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        spectronaut diaanalysis \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-            -fasta "~{fasta_1}" \
-            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
-            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(json_settings) then "-j " + json_settings else ""} \
-            -n "~{experiment_name}_bin_~{bin_index}" \
-            -o "${output_dir}" \
-            -d "${input_dir}" \
-            -a "~{search_archive}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee dia_analysis.log
+        # Process each file individually for DIA analysis
+        echo "Processing files individually for DIA analysis..."
+        file_count=0
+        for input_file in "${input_dir}"/*; do
+            # Skip if not a regular file
+            if [ ! -f "${input_file}" ]; then
+                continue
+            fi
 
-        # Move the single .sne file to cromwell root
-        echo "Moving SNE file from bin ~{bin_index}..."
-        sne_file=$(find "${output_dir}" -type f -name "*.sne" | head -n 1)
+            # Extract basename without any extension
+            full_basename=$(basename "${input_file}")
+            base_name="${full_basename%.*}"
 
-        if [ -z "${sne_file}" ] || [ ! -f "${sne_file}" ]; then
-            echo "ERROR: No .sne file found" >&2
+            # Create individual temp directories
+            file_input_dir="${cromwell_root}/input_${base_name}"
+            file_output_dir="${cromwell_root}/output_${base_name}"
+            file_tmp_dir="${cromwell_root}/temp_${base_name}"
+
+            mkdir -p "${file_input_dir}" "${file_output_dir}" "${file_tmp_dir}"
+
+            # Copy single file
+            cp "${input_file}" "${file_input_dir}/"
+
+            echo "Processing ${base_name} for DIA analysis..."
+            spectronaut diaanalysis \
+                ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+                -fasta "~{fasta_1}" \
+                ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+                ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+                ~{if defined(json_settings) then "-j " + json_settings else ""} \
+                -n "~{experiment_name}_bin_~{bin_index}_${base_name}" \
+                -o "${file_output_dir}" \
+                -d "${file_input_dir}" \
+                -a "~{search_archive}" \
+                -setTemp "${file_tmp_dir}" 2>&1 | tee "dia_analysis_${base_name}.log"
+
+            # Find and rename the .sne file
+            sne_file=$(find "${file_output_dir}" -type f -name "*.sne" | head -n 1)
+
+            if [ -z "${sne_file}" ] || [ ! -f "${sne_file}" ]; then
+                echo "ERROR: No .sne file produced for ${base_name}" >&2
+                exit 1
+            fi
+
+            # Move to cromwell root with unique name
+            output_name="~{experiment_name}_bin_~{bin_index}_${base_name}.sne"
+            mv "${sne_file}" "${cromwell_root}/${output_name}"
+            echo "Generated ${output_name}"
+
+            file_count=$((file_count + 1))
+        done
+
+        if [ "${file_count}" -eq 0 ]; then
+            echo "ERROR: No files were processed successfully" >&2
             exit 1
         fi
 
-        # Rename and move to cromwell root with standardized name
-        mv "${sne_file}" "${cromwell_root}/~{experiment_name}_bin_~{bin_index}.sne"
-
-        echo "DIA analysis complete. Generated SNE file: ~{experiment_name}_bin_~{
-            bin_index}.sne"
+        echo "DIA analysis complete. Generated ${file_count} SNE files for bin ~{
+            bin_index}"
 
         # ============================================================================
         # Resource Usage Report
@@ -1522,7 +1556,7 @@ task dia_analysis_binned {
     >>>
 
     output {
-        File sne_file = glob("*.sne")[0]
+        Array[File] sne_files = glob("*.sne")
     }
 
     runtime {
