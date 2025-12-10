@@ -59,8 +59,8 @@ workflow parallel_spectronaut {
 
     # Compute preset configurations based on experiment_type
     Map[String, Int] directDIA_search_cpu_presets = {
-        "proteome": 30,
-        "ptm": 40,
+        "proteome": 10,
+        "ptm": 20,
     }
     Map[String, Int] directDIA_search_ram_gb_presets = {
         "proteome": 90,
@@ -77,12 +77,12 @@ workflow parallel_spectronaut {
     }
 
     Map[String, Int] dia_analysis_cpu_presets = {
-        "proteome": 15,
-        "ptm": 25,
+        "proteome": 6,
+        "ptm": 9,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
-        "proteome": 80,
-        "ptm": 120,
+        "proteome": 70,
+        "ptm": 90,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
@@ -90,8 +90,8 @@ workflow parallel_spectronaut {
         "ptm": 4,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 40,
-        "ptm": 60,
+        "proteome": 25,
+        "ptm": 45,
     }
 
     # Validate experiment_type and fallback to "proteome" if invalid
