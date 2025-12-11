@@ -59,39 +59,59 @@ workflow parallel_spectronaut {
 
     # Compute preset configurations based on experiment_type
     Map[String, Int] directDIA_search_cpu_presets = {
-        "proteome": 10,
-        "ptm": 20,
+        "proteome": 32,
+        "ptm": 48,
     }
     Map[String, Int] directDIA_search_ram_gb_presets = {
-        "proteome": 90,
+        "proteome": 80,
         "ptm": 120,
     }
 
     Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 5,
-        "ptm": 5,
+        "proteome": 16,
+        "ptm": 16,
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 40,
+        "proteome": 50,
         "ptm": 80,
     }
 
     Map[String, Int] dia_analysis_cpu_presets = {
-        "proteome": 6,
-        "ptm": 9,
+        "proteome": 32,
+        "ptm": 48,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
-        "proteome": 70,
-        "ptm": 90,
+        "proteome": 80,
+        "ptm": 120,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
-        "proteome": 4,
-        "ptm": 4,
+        "proteome": 16,
+        "ptm": 16,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 25,
-        "ptm": 45,
+        "proteome": 40,
+        "ptm": 80,
+    }
+
+    Map[String, String] directDIA_search_machine_presets = {
+        "proteome": "n2d-highcpu-96",
+        "ptm": "n2d-highcpu-128",
+    }
+
+    Map[String, String] combine_archives_machine_presets = {
+        "proteome": "n2d-highmem-16",
+        "ptm": "n2d-highmem-16",
+    }
+
+    Map[String, String] dia_analysis_machine_presets = {
+        "proteome": "n2d-highcpu-48",
+        "ptm": "n2d-highcpu-64",
+    }
+
+    Map[String, String] combine_sne_machine_presets = {
+        "proteome": "n2d-highmem-16",
+        "ptm": "n2d-highmem-16",
     }
 
     # Validate experiment_type and fallback to "proteome" if invalid
@@ -112,6 +132,11 @@ workflow parallel_spectronaut {
 
     Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
     Int combine_sne_ram_gb = combine_sne_ram_gb_presets[validated_experiment_type]
+
+    String directDIA_search_machine = directDIA_search_machine_presets[validated_experiment_type]
+    String combine_archives_machine = combine_archives_machine_presets[validated_experiment_type]
+    String dia_analysis_machine = dia_analysis_machine_presets[validated_experiment_type]
+    String combine_sne_machine = combine_sne_machine_presets[validated_experiment_type]
 
     # ============================================================================
     # PHASE I: Discovery and Optional HTRMS Conversion (1 file per VM)
@@ -340,6 +365,7 @@ task list_files {
         memory: "8GB"
         bootDiskSizeGb: 20
         disks: "local-disk 50 HDD"
+        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -430,6 +456,7 @@ task create_bins {
         memory: "8GB"
         bootDiskSizeGb: 20
         disks: "local-disk 50 HDD"
+        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -468,6 +495,7 @@ task sum_floats {
         memory: "8GB"
         bootDiskSizeGb: 20
         disks: "local-disk 50 HDD"
+        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -511,6 +539,7 @@ task calculate_directory_size_gcs {
         memory: "8GB"
         bootDiskSizeGb: 20
         disks: "local-disk 50 HDD"
+        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -702,8 +731,10 @@ task convert_single_file_htrms {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        cpu: 2
-        memory: "18GB"
+        cpuPlatform: "AMD Rome"
+        predefinedMachineType: "n2d-standard-16"
+        cpu: 16
+        memory: "64GB"
         bootDiskSizeGb: 50
         disks: "local-disk ~{disk_size_gb} HDD"
         preemptible: n_preemptible
@@ -917,11 +948,13 @@ task directDIA_single_vm {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        predefinedMachineType: directDIA_search_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
         disks: "local-disk ~{ceil(total_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
+        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -1148,11 +1181,13 @@ task directDIA_search_binned {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        predefinedMachineType: directDIA_search_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
         disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
+        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -1324,11 +1359,13 @@ task combine_archives {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        predefinedMachineType: combine_archives_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
         disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
+        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -1561,11 +1598,13 @@ task dia_analysis_binned {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        predefinedMachineType: dia_analysis_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
         disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
+        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -1756,10 +1795,12 @@ task combine_sne {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        predefinedMachineType: combine_sne_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
         disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
+        cpuPlatform: "AMD Rome"
     }
 }
