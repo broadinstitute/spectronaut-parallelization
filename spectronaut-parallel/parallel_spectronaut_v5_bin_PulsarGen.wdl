@@ -153,8 +153,8 @@ workflow parallel_spectronaut {
     # CONDITIONAL PATH: do_conversion=true vs false
     # ============================================================================
 
-    if (do_conversion) {
-        # CONVERSION PATH: Scatter convert and calculate sizes per file
+    if (do_conversion && num_vms == 1) {
+        # CONVERSION PATH: Scatter convert and calculate sizes per file (only in single VM mode)
         scatter (raw_file_path in raw_file_paths) {
             call convert_single_file_htrms { input:
                 file_path = raw_file_path,
@@ -174,8 +174,8 @@ workflow parallel_spectronaut {
         }
     }
 
-    if (!do_conversion) {
-        # NO CONVERSION PATH: Calculate directory size via gcloud
+    if (!do_conversion || num_vms > 1) {
+        # NO CONVERSION PATH: Calculate directory size via gcloud when skipping conversion
         call calculate_directory_size_gcs { input:
             gcs_directory_path = file_directory,
         }
@@ -230,6 +230,7 @@ workflow parallel_spectronaut {
             cpu = directDIA_search_cpu,
             ram_gb = directDIA_search_ram_gb,
             n_preemptible = n_preemptible_directDIA_search,
+            predefined_machine_type = directDIA_search_machine,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
     }
@@ -255,6 +256,7 @@ workflow parallel_spectronaut {
                 ram_gb = directDIA_search_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_directDIA_search,
+                predefined_machine_type = directDIA_search_machine,
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
@@ -275,6 +277,7 @@ workflow parallel_spectronaut {
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_archives,
+            predefined_machine_type = combine_archives_machine,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
 
@@ -295,6 +298,7 @@ workflow parallel_spectronaut {
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
                 n_preemptible = n_preemptible_dia_analysis,
+                predefined_machine_type = dia_analysis_machine,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
@@ -318,6 +322,7 @@ workflow parallel_spectronaut {
             disk_size_multiplier = disk_size_multiplier,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
+            predefined_machine_type = combine_sne_machine,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
     }
@@ -581,7 +586,7 @@ task convert_single_file_htrms {
 
         # Download single file from GCS
         echo "Downloading file: ~{file_path}"
-        gcloud storage cp "~{file_path}" "${input_dir}/"
+        gcloud storage cp -r "~{file_path}" "${input_dir}/"
 
         # Verify file was downloaded
         file_count=$(find "${input_dir}" -type f | wc -l)
@@ -752,6 +757,7 @@ task directDIA_single_vm {
         Int ram_gb
         Int allocated_disk_gb
         Int n_preemptible
+        String predefined_machine_type
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -797,8 +803,12 @@ task directDIA_single_vm {
         # Copy all input files to input directory
         echo "Copying input files to input directory..."
         while IFS= read -r input_file; do
-            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
-                cp "${input_file}" "${input_dir}/"
+            if [ -n "${input_file}" ]; then
+                if [ -d "${input_file}" ]; then
+                    cp -r "${input_file}" "${input_dir}/"
+                elif [ -f "${input_file}" ]; then
+                    cp "${input_file}" "${input_dir}/"
+                fi
             fi
         done < ~{write_lines(input_files)}
 
@@ -948,7 +958,7 @@ task directDIA_single_vm {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: directDIA_search_machine
+        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -969,6 +979,7 @@ task directDIA_search_binned {
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
+        String predefined_machine_type
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -1007,7 +1018,11 @@ task directDIA_search_binned {
         echo "Copying input files..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                cp "${input_file}" "${input_dir}/"
+                if [ -d "${input_file}" ]; then
+                    cp -r "${input_file}" "${input_dir}/"
+                else
+                    cp "${input_file}" "${input_dir}/"
+                fi
             fi
         done < ~{write_lines(input_files)}
 
@@ -1177,12 +1192,12 @@ task directDIA_search_binned {
     >>>
 
     output {
-        Array[File] search_archives = glob("search_archive_bin_~{bin_index}_*.psar")
+        Array[File] search_archives = glob("*.psar")
     }
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: directDIA_search_machine
+        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1201,6 +1216,7 @@ task combine_archives {
         Int ram_gb
         Int allocated_disk_gb
         Int n_preemptible
+        String predefined_machine_type
         File? enzyme_database
     }
 
@@ -1360,7 +1376,7 @@ task combine_archives {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: combine_archives_machine
+        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1383,6 +1399,7 @@ task dia_analysis_binned {
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
+        String predefined_machine_type
         File? enzyme_database
         File? analysis_schema
         File? fasta_2
@@ -1421,8 +1438,12 @@ task dia_analysis_binned {
         # Copy all input files to input directory
         echo "Copying input files..."
         while IFS= read -r input_file; do
-            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
-                cp "${input_file}" "${input_dir}/"
+            if [ -n "${input_file}" ]; then
+                if [ -d "${input_file}" ]; then
+                    cp -r "${input_file}" "${input_dir}/"
+                elif [ -f "${input_file}" ]; then
+                    cp "${input_file}" "${input_dir}/"
+                fi
             fi
         done < ~{write_lines(input_files)}
 
@@ -1599,7 +1620,7 @@ task dia_analysis_binned {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: dia_analysis_machine
+        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1619,6 +1640,7 @@ task combine_sne {
         Int cpu
         Int allocated_disk_gb
         Int n_preemptible
+        String predefined_machine_type
         File? condition_setup
         File? report_schema_1
         File? report_schema_2
@@ -1796,7 +1818,7 @@ task combine_sne {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: combine_sne_machine
+        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
