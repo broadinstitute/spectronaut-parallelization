@@ -94,25 +94,6 @@ workflow parallel_spectronaut {
         "ptm": 80,
     }
 
-    Map[String, String] directDIA_search_machine_presets = {
-        "proteome": "n2d-highcpu-96",
-        "ptm": "n2d-highcpu-128",
-    }
-
-    Map[String, String] combine_archives_machine_presets = {
-        "proteome": "n2d-highmem-16",
-        "ptm": "n2d-highmem-16",
-    }
-
-    Map[String, String] dia_analysis_machine_presets = {
-        "proteome": "n2d-highcpu-48",
-        "ptm": "n2d-highcpu-64",
-    }
-
-    Map[String, String] combine_sne_machine_presets = {
-        "proteome": "n2d-highmem-16",
-        "ptm": "n2d-highmem-16",
-    }
 
     # Validate experiment_type and fallback to "proteome" if invalid
     String validated_experiment_type = if (experiment_type == "proteome" || experiment_type
@@ -132,11 +113,6 @@ workflow parallel_spectronaut {
 
     Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
     Int combine_sne_ram_gb = combine_sne_ram_gb_presets[validated_experiment_type]
-
-    String directDIA_search_machine = directDIA_search_machine_presets[validated_experiment_type]
-    String combine_archives_machine = combine_archives_machine_presets[validated_experiment_type]
-    String dia_analysis_machine = dia_analysis_machine_presets[validated_experiment_type]
-    String combine_sne_machine = combine_sne_machine_presets[validated_experiment_type]
 
     # ============================================================================
     # PHASE I: Discovery and Optional HTRMS Conversion (1 file per VM)
@@ -230,7 +206,6 @@ workflow parallel_spectronaut {
             cpu = directDIA_search_cpu,
             ram_gb = directDIA_search_ram_gb,
             n_preemptible = n_preemptible_directDIA_search,
-            predefined_machine_type = directDIA_search_machine,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
     }
@@ -256,7 +231,6 @@ workflow parallel_spectronaut {
                 ram_gb = directDIA_search_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_directDIA_search,
-                predefined_machine_type = directDIA_search_machine,
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
@@ -277,7 +251,6 @@ workflow parallel_spectronaut {
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_archives,
-            predefined_machine_type = combine_archives_machine,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
 
@@ -298,7 +271,6 @@ workflow parallel_spectronaut {
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
                 n_preemptible = n_preemptible_dia_analysis,
-                predefined_machine_type = dia_analysis_machine,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
@@ -322,7 +294,6 @@ workflow parallel_spectronaut {
             disk_size_multiplier = disk_size_multiplier,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
-            predefined_machine_type = combine_sne_machine,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
     }
@@ -737,7 +708,6 @@ task convert_single_file_htrms {
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpuPlatform: "AMD Rome"
-        predefinedMachineType: "n2d-standard-16"
         cpu: 16
         memory: "64GB"
         bootDiskSizeGb: 50
@@ -757,7 +727,6 @@ task directDIA_single_vm {
         Int ram_gb
         Int allocated_disk_gb
         Int n_preemptible
-        String predefined_machine_type
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -958,7 +927,6 @@ task directDIA_single_vm {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -979,7 +947,6 @@ task directDIA_search_binned {
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
-        String predefined_machine_type
         File? analysis_schema
         File? fasta_2
         File? fasta_3
@@ -1197,7 +1164,6 @@ task directDIA_search_binned {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1216,7 +1182,6 @@ task combine_archives {
         Int ram_gb
         Int allocated_disk_gb
         Int n_preemptible
-        String predefined_machine_type
         File? enzyme_database
     }
 
@@ -1376,7 +1341,6 @@ task combine_archives {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1399,7 +1363,6 @@ task dia_analysis_binned {
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
-        String predefined_machine_type
         File? enzyme_database
         File? analysis_schema
         File? fasta_2
@@ -1620,7 +1583,6 @@ task dia_analysis_binned {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1640,7 +1602,6 @@ task combine_sne {
         Int cpu
         Int allocated_disk_gb
         Int n_preemptible
-        String predefined_machine_type
         File? condition_setup
         File? report_schema_1
         File? report_schema_2
@@ -1818,7 +1779,6 @@ task combine_sne {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: predefined_machine_type
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
