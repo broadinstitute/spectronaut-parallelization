@@ -1,9 +1,16 @@
 version development
 
-# Universal HTRMS Conversion with Conditional Search Modes
-# Phase I: Each raw file converted to HTRMS in its own VM
-# Phase II: HTRMS files binned across n VMs
-# Phase III: Conditional execution - Single VM (num_vms=1) or Parallel (num_vms>1)
+# Two-Step Pulsar Search Architecture with Optimized Model Training
+# Phase I: Discovery - List raw files from GCS
+# Phase II: Intelligent Binning - Distribute files across n VMs
+# Phase III: Conditional Execution - Single VM (num_vms=1) or Parallel Multi-Step (num_vms>1)
+#   Parallel Mode:
+#     Step 1.1: Generate intermediate search archives per bin
+#     Step 1.2: Combine archives to train optimized models (.qsp)
+#     Step 1.3: Generate final search archives with optimized models
+#     Step 1.4: Merge final archives into search library (.kit)
+#     Step 2: DIA analysis per bin against merged library
+#     Step 3: Combine SNE files and generate reports
 workflow parallel_spectronaut {
     input {
         File fasta_1  # Primary FASTA database file (required)
@@ -23,7 +30,6 @@ workflow parallel_spectronaut {
         # ============================================================================
         # Analysis Settings & Schemas
         # ============================================================================
-        File? convert_schema  # Schema for HTRMS conversion
         File? search_settings  # Settings for directDIA search and DIA analysis
         File? json_settings  # JSON settings for Spectronaut
         File? condition_setup  # Experimental condition setup
@@ -40,33 +46,55 @@ workflow parallel_spectronaut {
         # Workflow Configuration
         # ============================================================================
         String experiment_type = "proteome"  # Experiment type: "proteome" or "ptm" (affects resource presets)
-        Boolean do_conversion = true  # Enable HTRMS conversion (always true in current version)
         Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
         # ============================================================================
         # Resource Configuration
         # ============================================================================
         Int disk_size_multiplier = 3  # Multiplier for dynamic disk size calculation
-        Int htrms_conversion_disk_gb = 100  # Fixed disk size per VM for HTRMS conversion
 
         # Preemptible instance settings (0 = non-preemptible, >0 = number of preemptible attempts)
-        Int n_preemptible_htrms_conversion = 2  # HTRMS conversion preemptible attempts
-        Int n_preemptible_directDIA_search = 0  # directDIA search preemptible attempts
+        Int n_preemptible_pulsar_step1 = 0  # Pulsar step 1 preemptible attempts
+        Int n_preemptible_pulsar_step2 = 0  # Pulsar step 2 preemptible attempts
+        Int n_preemptible_pulsar_step3 = 0  # Pulsar step 3 preemptible attempts
+        Int n_preemptible_directDIA_single_vm = 0  # DirectDIA single VM preemptible attempts
         Int n_preemptible_combine_archives = 0  # Archive combining preemptible attempts
         Int n_preemptible_dia_analysis = 0  # DIA analysis preemptible attempts
         Int n_preemptible_combine_sne = 0  # SNE combining preemptible attempts
     }
 
     # Compute preset configurations based on experiment_type
-    Map[String, Int] directDIA_search_cpu_presets = {
+    # Pulsar Step 1: Generate intermediate search archives (similar to directDIA search)
+    Map[String, Int] pulsar_step1_cpu_presets = {
         "proteome": 32,
         "ptm": 48,
     }
-    Map[String, Int] directDIA_search_ram_gb_presets = {
+    Map[String, Int] pulsar_step1_ram_gb_presets = {
         "proteome": 80,
         "ptm": 120,
     }
 
+    # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
+    Map[String, Int] pulsar_step2_cpu_presets = {
+        "proteome": 16,
+        "ptm": 24,
+    }
+    Map[String, Int] pulsar_step2_ram_gb_presets = {
+        "proteome": 64,
+        "ptm": 96,
+    }
+
+    # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
+    Map[String, Int] pulsar_step3_cpu_presets = {
+        "proteome": 32,
+        "ptm": 48,
+    }
+    Map[String, Int] pulsar_step3_ram_gb_presets = {
+        "proteome": 80,
+        "ptm": 120,
+    }
+
+    # Combine final archives into .kit library
     Map[String, Int] combine_archives_cpu_presets = {
         "proteome": 16,
         "ptm": 16,
@@ -76,6 +104,17 @@ workflow parallel_spectronaut {
         "ptm": 80,
     }
 
+    # DirectDIA single VM (does both search and analysis in one step)
+    Map[String, Int] directDIA_single_vm_cpu_presets = {
+        "proteome": 32,
+        "ptm": 48,
+    }
+    Map[String, Int] directDIA_single_vm_ram_gb_presets = {
+        "proteome": 80,
+        "ptm": 120,
+    }
+
+    # DIA analysis per bin (after library is created)
     Map[String, Int] dia_analysis_cpu_presets = {
         "proteome": 32,
         "ptm": 48,
@@ -94,37 +133,27 @@ workflow parallel_spectronaut {
         "ptm": 80,
     }
 
-    Map[String, String] directDIA_search_machine_presets = {
-        "proteome": "n2d-highcpu-96",
-        "ptm": "n2d-highcpu-128",
-    }
-
-    Map[String, String] combine_archives_machine_presets = {
-        "proteome": "n2d-highmem-16",
-        "ptm": "n2d-highmem-16",
-    }
-
-    Map[String, String] dia_analysis_machine_presets = {
-        "proteome": "n2d-highcpu-48",
-        "ptm": "n2d-highcpu-64",
-    }
-
-    Map[String, String] combine_sne_machine_presets = {
-        "proteome": "n2d-highmem-16",
-        "ptm": "n2d-highmem-16",
-    }
 
     # Validate experiment_type and fallback to "proteome" if invalid
     String validated_experiment_type = if (experiment_type == "proteome" || experiment_type
         == "ptm") then experiment_type else "proteome"
 
     # Look up values based on validated_experiment_type
-    Int directDIA_search_cpu = directDIA_search_cpu_presets[validated_experiment_type]
-    Int directDIA_search_ram_gb = directDIA_search_ram_gb_presets[
-        validated_experiment_type]
+    Int pulsar_step1_cpu = pulsar_step1_cpu_presets[validated_experiment_type]
+    Int pulsar_step1_ram_gb = pulsar_step1_ram_gb_presets[validated_experiment_type]
+
+    Int pulsar_step2_cpu = pulsar_step2_cpu_presets[validated_experiment_type]
+    Int pulsar_step2_ram_gb = pulsar_step2_ram_gb_presets[validated_experiment_type]
+
+    Int pulsar_step3_cpu = pulsar_step3_cpu_presets[validated_experiment_type]
+    Int pulsar_step3_ram_gb = pulsar_step3_ram_gb_presets[validated_experiment_type]
 
     Int combine_archives_cpu = combine_archives_cpu_presets[validated_experiment_type]
     Int combine_archives_ram_gb = combine_archives_ram_gb_presets[
+        validated_experiment_type]
+
+    Int directDIA_single_vm_cpu = directDIA_single_vm_cpu_presets[validated_experiment_type]
+    Int directDIA_single_vm_ram_gb = directDIA_single_vm_ram_gb_presets[
         validated_experiment_type]
 
     Int dia_analysis_cpu = dia_analysis_cpu_presets[validated_experiment_type]
@@ -133,13 +162,8 @@ workflow parallel_spectronaut {
     Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
     Int combine_sne_ram_gb = combine_sne_ram_gb_presets[validated_experiment_type]
 
-    String directDIA_search_machine = directDIA_search_machine_presets[validated_experiment_type]
-    String combine_archives_machine = combine_archives_machine_presets[validated_experiment_type]
-    String dia_analysis_machine = dia_analysis_machine_presets[validated_experiment_type]
-    String combine_sne_machine = combine_sne_machine_presets[validated_experiment_type]
-
     # ============================================================================
-    # PHASE I: Discovery and Optional HTRMS Conversion (1 file per VM)
+    # PHASE I: Discovery
     # ============================================================================
 
     # List all raw files in the input directory
@@ -147,49 +171,12 @@ workflow parallel_spectronaut {
         gcs_path = file_directory,
     }
 
-    Array[String] raw_file_paths = read_lines(list_files.file_list)
-
-    # ============================================================================
-    # CONDITIONAL PATH: do_conversion=true vs false
-    # ============================================================================
-
-    if (do_conversion) {
-        # CONVERSION PATH: Scatter convert and calculate sizes per file
-        scatter (raw_file_path in raw_file_paths) {
-            call convert_single_file_htrms { input:
-                file_path = raw_file_path,
-                disk_size_gb = htrms_conversion_disk_gb,
-                convert_schema = convert_schema,
-                n_preemptible = n_preemptible_htrms_conversion,
-            }
-        }
-
-        # Gather converted files and their sizes
-        Array[File] converted_files = convert_single_file_htrms.htrms_file
-        Array[Float] converted_file_sizes = convert_single_file_htrms.htrms_size_gb
-
-        # Sum all individual converted file sizes
-        call sum_floats as sum_converted_sizes { input:
-            values = converted_file_sizes,
-        }
+    # Calculate directory size for disk allocation
+    call calculate_directory_size_gcs { input:
+        gcs_directory_path = file_directory,
     }
 
-    if (!do_conversion) {
-        # NO CONVERSION PATH: Calculate directory size via gcloud
-        call calculate_directory_size_gcs { input:
-            gcs_directory_path = file_directory,
-        }
-    }
-
-    # Select appropriate file array and total size based on path
-    Array[File] all_input_files = select_first([
-        converted_files,
-        read_lines(list_files.file_list),
-    ])
-    Float total_input_size_gb = select_first([
-        sum_converted_sizes.total,
-        calculate_directory_size_gcs.total_size_gb,
-    ])
+    Float total_input_size_gb = calculate_directory_size_gcs.total_size_gb
 
     # ============================================================================
     # PHASE II: Intelligent Binning
@@ -197,7 +184,7 @@ workflow parallel_spectronaut {
 
     # Bin input files with sorting and validation
     call create_bins { input:
-        file_paths = read_lines(write_lines(all_input_files)),
+        file_paths = read_lines(list_files.file_list),
         num_bins = num_vms,
     }
 
@@ -213,7 +200,7 @@ workflow parallel_spectronaut {
         # Run classic directDIA on all files in one VM
         call directDIA_single_vm { input:
             experiment_name = experiment_name,
-            input_files = all_input_files,
+            input_files = flatten(file_bins),
             total_size_gb = total_input_size_gb,
             disk_size_multiplier = disk_size_multiplier,
             analysis_schema = search_settings,
@@ -227,9 +214,9 @@ workflow parallel_spectronaut {
             report_schema_2 = report_schema_2,
             report_schema_3 = report_schema_3,
             report_schema_4 = report_schema_4,
-            cpu = directDIA_search_cpu,
-            ram_gb = directDIA_search_ram_gb,
-            n_preemptible = n_preemptible_directDIA_search,
+            cpu = directDIA_single_vm_cpu,
+            ram_gb = directDIA_single_vm_ram_gb,
+            n_preemptible = n_preemptible_directDIA_single_vm,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
     }
@@ -240,50 +227,95 @@ workflow parallel_spectronaut {
         # Calculate approximate size per VM for disk allocation
         Float bin_size_per_vm = total_input_size_gb / calculated_num_vms + 25
 
-        # Scatter: Generate search archives for each bin
+        # ========================================================================
+        # STEP 1.1: Generate intermediate search archives per bin (scatter)
+        # ========================================================================
         scatter (i in range(length(file_bins))) {
-
-            # directDIA search for search archive generation
-            call directDIA_search_binned { input:
+            call pulsar_step1_binned { input:
                 input_files = file_bins[i],
                 analysis_schema = search_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
                 enzyme_database = enzyme_database,
-                cpu = directDIA_search_cpu,
-                ram_gb = directDIA_search_ram_gb,
+                cpu = pulsar_step1_cpu,
+                ram_gb = pulsar_step1_ram_gb,
                 bin_index = i,
-                n_preemptible = n_preemptible_directDIA_search,
+                n_preemptible = n_preemptible_pulsar_step1,
                 bin_size_gb = bin_size_per_vm,
                 disk_size_multiplier = disk_size_multiplier,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
 
-        # Collect all archives from all bins (each bin produces multiple archives)
-        Array[Array[File]] all_archives_nested = directDIA_search_binned.search_archives
-        Array[File] all_archives = flatten(all_archives_nested)
+        # Collect all intermediate archives (one per bin)
+        Array[File] intermediate_archives = pulsar_step1_binned.intermediate_archive
 
-        # Combine scattered search archives into one
-        # Uses total_input_size_gb for disk estimation instead of summing bin sizes
-        call combine_archives { input:
-            input_archives = all_archives,
+        # ========================================================================
+        # STEP 1.2: Combine intermediate archives to generate optimized models
+        # ========================================================================
+        call pulsar_step2_combine_models { input:
+            intermediate_archives = intermediate_archives,
+            experiment_name = experiment_name,
+            total_input_size_gb = total_input_size_gb,
+            disk_size_multiplier = disk_size_multiplier,
+            cpu = pulsar_step2_cpu,
+            ram_gb = pulsar_step2_ram_gb,
+            enzyme_database = enzyme_database,
+            n_preemptible = n_preemptible_pulsar_step2,
+            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
+        }
+
+        # ========================================================================
+        # STEP 1.3: Generate final search archives per bin with optimized models
+        # ========================================================================
+        scatter (i in range(length(file_bins))) {
+            call pulsar_step3_binned { input:
+                input_files = file_bins[i],
+                intermediate_archive = pulsar_step1_binned.intermediate_archive[i],
+                optimized_models = pulsar_step2_combine_models.optimized_models,
+                experiment_name = experiment_name,
+                analysis_schema = search_settings,
+                fasta_1 = fasta_1,
+                fasta_2 = fasta_2,
+                fasta_3 = fasta_3,
+                enzyme_database = enzyme_database,
+                cpu = pulsar_step3_cpu,
+                ram_gb = pulsar_step3_ram_gb,
+                bin_index = i,
+                n_preemptible = n_preemptible_pulsar_step3,
+                bin_size_gb = bin_size_per_vm,
+                disk_size_multiplier = disk_size_multiplier,
+                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
+            }
+        }
+
+        # Collect all final archives (one per bin)
+        Array[File] final_archives = pulsar_step3_binned.final_archive
+
+        # ========================================================================
+        # STEP 1.4: Merge final search archives into single .kit library
+        # ========================================================================
+        call combine_final_archives { input:
+            input_archives = final_archives,
             total_input_size_gb = total_input_size_gb,
             disk_size_multiplier = disk_size_multiplier,
             cpu = combine_archives_cpu,
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
+            analysis_schema = search_settings,
             n_preemptible = n_preemptible_combine_archives,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
 
-        # Scatter: DIA analysis for each bin against the merged library
+        # ========================================================================
+        # STEP 2: DIA analysis per bin against merged library
+        # ========================================================================
         scatter (i in range(length(file_bins))) {
             call dia_analysis_binned { input:
                 experiment_name = experiment_name,
                 input_files = file_bins[i],
-                search_archive = combine_archives.merged_archive,
+                search_archive = combine_final_archives.merged_archive,
                 analysis_schema = search_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
@@ -302,7 +334,9 @@ workflow parallel_spectronaut {
         Array[Array[File]] all_sne_nested = dia_analysis_binned.sne_files
         Array[File] all_sne = flatten(all_sne_nested)
 
-        # Combine scattered SNE files and generate reports
+        # ========================================================================
+        # STEP 3: Combine scattered SNE files and generate reports
+        # ========================================================================
         call combine_sne { input:
             experiment_name = experiment_name,
             sne_files = all_sne,
@@ -460,44 +494,6 @@ task create_bins {
     }
 }
 
-task sum_floats {
-    input {
-        Array[Float] values
-    }
-
-    command <<<
-                python3 <<CODE
-        import json
-
-        # Read values
-        values_file = "~{write_json(values)}"
-        with open(values_file) as f:
-            values = json.load(f)
-
-        # Calculate sum
-        total = sum(values)
-
-        # Write total
-        with open("total.txt", "w") as f:
-            f.write(str(total))
-
-        print(f"Sum of {len(values)} values: {total}")
-        CODE
-    >>>
-
-    output {
-        Float total = read_float("total.txt")
-    }
-
-    runtime {
-        docker: "python:3.9-slim"
-        cpu: 2
-        memory: "8GB"
-        bootDiskSizeGb: 20
-        disks: "local-disk 50 HDD"
-        cpuPlatform: "AMD Rome"
-    }
-}
 
 task calculate_directory_size_gcs {
     input {
@@ -543,203 +539,6 @@ task calculate_directory_size_gcs {
     }
 }
 
-task convert_single_file_htrms {
-    input {
-        String file_path
-        Int disk_size_gb
-        Int n_preemptible
-        File? convert_schema
-    }
-
-    command <<<
-        set -euo pipefail
-
-        cromwell_root=$(pwd)
-
-        # Resource Monitoring Initialization
-        wall_start=$(date +%s%N)  # Nanoseconds since epoch
-
-        # Cgroup V2 (modern)
-        if [ -f /sys/fs/cgroup/cpu.stat ]; then
-            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
-            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
-        # Cgroup V1 (legacy)
-        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
-            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
-        else
-            cpu_start_ns=0
-        fi
-
-        input_dir="${cromwell_root}/work_input"
-        mkdir -p "${input_dir}"
-
-        output_dir="${cromwell_root}/out_conversion"
-        mkdir -p "${output_dir}"
-
-        tmp_dir="${cromwell_root}/sn_temp"
-        mkdir -p "${tmp_dir}"
-
-        # Download single file from GCS
-        echo "Downloading file: ~{file_path}"
-        gcloud storage cp "~{file_path}" "${input_dir}/"
-
-        # Verify file was downloaded
-        file_count=$(find "${input_dir}" -type f | wc -l)
-        if [ "${file_count}" -eq 0 ]; then
-            echo "ERROR: File download failed" >&2
-            exit 1
-        fi
-
-        echo "File downloaded successfully."
-        # Convert to HTRMS
-        echo "Starting HTRMS conversion..."
-        spectronaut -convert \
-            -i "${input_dir}" \
-            -o "${output_dir}" \
-            ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
-            -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
-
-        # Move HTRMS file to output
-        echo "Moving HTRMS file..."
-        htrms_count=$(find "${output_dir}" -type f -name "*.htrms" | wc -l)
-        if [ "${htrms_count}" -eq 0 ]; then
-            echo "ERROR: No .htrms file produced" >&2
-            exit 1
-        fi
-
-        find "${output_dir}" -type f -name "*.htrms" -exec mv {} "${cromwell_root}/" \;
-        echo "Conversion complete. Generated ${htrms_count} HTRMS file."
-
-        # Calculate HTRMS file size
-        echo "Calculating HTRMS file size..."
-        htrms_file_path=$(find "${cromwell_root}" -type f -name "*.htrms")
-        if [ -f "${htrms_file_path}" ]; then
-            size_bytes=$(stat -c%s "${htrms_file_path}" 2>/dev/null || stat -f%z "${htrms_file_path}")
-            size_gb=$(awk "BEGIN {printf \"%.2f\", ${size_bytes} / (1024^3)}")
-            echo "${size_gb}" > "${cromwell_root}/htrms_size_gb.txt"
-            echo "HTRMS file size: ${size_gb} GB"
-        else
-            echo "ERROR: HTRMS file not found for size calculation" >&2
-            exit 1
-        fi
-
-        # ============================================================================
-        # Resource Usage Report
-        # ============================================================================
-        echo "==========================================="
-        echo "=== RESOURCE USAGE REPORT ==="
-        echo "==========================================="
-
-        # --- CPU Utilization ---
-        echo ""
-        echo "--- CPU Utilization ---"
-
-        wall_end=$(date +%s%N)
-        wall_elapsed_ns=$((wall_end - wall_start))
-
-        # Cgroup V2
-        if [ -f /sys/fs/cgroup/cpu.stat ]; then
-            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
-            cpu_end_ns=$((cpu_end * 1000))
-        # Cgroup V1
-        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
-            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
-        else
-            cpu_end_ns=0
-        fi
-
-        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
-            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
-            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
-                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
-            allocated_cpus=6
-            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
-                'BEGIN { printf "%.2f", total / cpus }')
-
-            echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
-            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
-            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
-        else
-            echo "CPU utilization data not available"
-        fi
-
-        # --- Memory Usage ---
-        echo ""
-        echo "--- Memory Usage ---"
-
-        # Cgroup V2
-        if [ -f /sys/fs/cgroup/memory.peak ]; then
-            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
-            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
-        # Cgroup V1
-        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
-            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
-            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
-        else
-            max_mem_bytes=0
-            limit_bytes=0
-        fi
-
-        if [ "$max_mem_bytes" -gt 0 ]; then
-            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
-            echo "Actual Peak RAM: ${max_mem_gb} GB"
-
-            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
-                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
-                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
-                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
-                echo "RAM Limit: ${limit_gb} GB"
-                echo "RAM Usage: ${usage_percent}%"
-            fi
-        else
-            echo "Memory usage data not available"
-        fi
-
-        # --- Disk Usage ---
-        echo ""
-        echo "--- Disk Usage ---"
-
-        allocated_disk_gb=~{disk_size_gb}
-        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
-
-        if command -v df >/dev/null 2>&1; then
-            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
-
-            if [ -n "${disk_used_output}" ]; then
-                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
-                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
-                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
-
-                echo "Actual Max Disk Used: ${disk_used_gb} GB"
-                echo "Disk Usage: ${disk_usage_percent}%"
-            else
-                echo "Could not measure disk usage"
-            fi
-        else
-            echo "df command not available"
-        fi
-
-        echo ""
-        echo "==========================================="
-    >>>
-
-    output {
-        File htrms_file = glob("*.htrms")[0]
-        Float htrms_size_gb = read_float("htrms_size_gb.txt")
-    }
-
-    runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        cpuPlatform: "AMD Rome"
-        predefinedMachineType: "n2d-standard-16"
-        cpu: 16
-        memory: "64GB"
-        bootDiskSizeGb: 50
-        disks: "local-disk ~{disk_size_gb} HDD"
-        preemptible: n_preemptible
-    }
-}
 
 task directDIA_single_vm {
     input {
@@ -797,8 +596,12 @@ task directDIA_single_vm {
         # Copy all input files to input directory
         echo "Copying input files to input directory..."
         while IFS= read -r input_file; do
-            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
-                cp "${input_file}" "${input_dir}/"
+            if [ -n "${input_file}" ]; then
+                if [ -d "${input_file}" ]; then
+                    cp -r "${input_file}" "${input_dir}/"
+                elif [ -f "${input_file}" ]; then
+                    cp "${input_file}" "${input_dir}/"
+                fi
             fi
         done < ~{write_lines(input_files)}
 
@@ -948,7 +751,6 @@ task directDIA_single_vm {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: directDIA_search_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -958,7 +760,7 @@ task directDIA_single_vm {
     }
 }
 
-task directDIA_search_binned {
+task pulsar_step1_binned {
     input {
         File fasta_1
         Array[File] input_files
@@ -997,19 +799,27 @@ task directDIA_search_binned {
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
 
-        output_dir="${cromwell_root}/out_archive"
+        output_dir="${cromwell_root}/out_pulsar_step1"
         mkdir -p "${output_dir}"
 
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all input files to input directory
-        echo "Copying input files..."
+        # Copy ALL binned files to input directory (no for-loop processing)
+        echo "Copying all input files for bin ~{bin_index}..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                cp "${input_file}" "${input_dir}/"
+                if [ -d "${input_file}" ]; then
+                    cp -r "${input_file}" "${input_dir}/"
+                elif [ -f "${input_file}" ]; then
+                    cp "${input_file}" "${input_dir}/"
+                fi
             fi
         done < ~{write_lines(input_files)}
+
+        # Verify files were copied
+        file_count=$(find "${input_dir}" -type f | wc -l)
+        echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
@@ -1017,62 +827,31 @@ task directDIA_search_binned {
             dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        # Process each file individually for search archive generation
-        echo "Processing files individually for search archive generation..."
-        file_count=0
-        for input_file in "${input_dir}"/*; do
-            # Skip if not a regular file
-            if [ ! -f "${input_file}" ]; then
-                continue
-            fi
+        # Run Pulsar Step 1 on ALL files in the bin at once (batch processing)
+        echo "Running Pulsar Step 1 for bin ~{bin_index} (batch processing ${file_count} files)..."
+        spectronaut lg -se Pulsar \
+            -d "${input_dir}" \
+            -fasta "~{fasta_1}" \
+            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            --pulsarStage pulsarStep1 \
+            -a "${output_dir}/search_archive_step1_bin_~{bin_index}.psar" \
+            -o "${output_dir}" \
+            -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step1_bin_~{bin_index}.log
 
-            # Extract basename without any extension
-            full_basename=$(basename "${input_file}")
-            base_name="${full_basename%.*}"
-
-            # Create individual temp directories
-            file_input_dir="${cromwell_root}/input_${base_name}"
-            file_output_dir="${cromwell_root}/output_${base_name}"
-            file_tmp_dir="${cromwell_root}/temp_${base_name}"
-
-            mkdir -p "${file_input_dir}" "${file_output_dir}" "${file_tmp_dir}"
-
-            # Copy single file
-            cp "${input_file}" "${file_input_dir}/"
-
-            echo "Processing ${base_name}..."
-            spectronaut direct \
-                -d "${file_input_dir}" \
-                -fasta "~{fasta_1}" \
-                ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
-                ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-                ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-                -o "${file_output_dir}" \
-                -setTemp "${file_tmp_dir}" 2>&1 | tee "archive_${base_name}.log"
-
-            # Find and rename the .psar file
-            psar_file=$(find "${file_output_dir}" -type f -name "*.psar" | head -n 1)
-
-            if [ -z "${psar_file}" ] || [ ! -f "${psar_file}" ]; then
-                echo "ERROR: No .psar file produced for ${base_name}" >&2
-                exit 1
-            fi
-
-            # Move to cromwell root with unique name
-            output_name="search_archive_bin_~{bin_index}_${base_name}.psar"
-            mv "${psar_file}" "${cromwell_root}/${output_name}"
-            echo "Generated ${output_name}"
-
-            file_count=$((file_count + 1))
-        done
-
-        if [ "${file_count}" -eq 0 ]; then
-            echo "ERROR: No files were processed successfully" >&2
+        # Verify output
+        psar_file="${output_dir}/search_archive_step1_bin_~{bin_index}.psar"
+        if [ ! -f "${psar_file}" ]; then
+            echo "ERROR: Intermediate .psar file not found for bin ~{bin_index}" >&2
+            echo "Output directory contents:" >&2
+            ls -lh "${output_dir}" >&2
             exit 1
         fi
 
-        echo "Archive generation complete. Generated ${file_count} search archives for bin ~{
-            bin_index}"
+        # Move to cromwell root
+        mv "${psar_file}" "${cromwell_root}/search_archive_step1_bin_~{bin_index}.psar"
+        echo "Generated intermediate search archive: search_archive_step1_bin_~{bin_index}.psar"
 
         # ============================================================================
         # Resource Usage Report
@@ -1176,22 +955,426 @@ task directDIA_search_binned {
     >>>
 
     output {
-        Array[File] search_archives = glob("search_archive_bin_~{bin_index}_*.psar")
+        File intermediate_archive = "search_archive_step1_bin_~{bin_index}.psar"
     }
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: directDIA_search_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
+        disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
     }
 }
 
-task combine_archives {
+task pulsar_step2_combine_models {
+    input {
+        Array[File] intermediate_archives
+        String experiment_name
+        Float total_input_size_gb
+        Int disk_size_multiplier
+        Int cpu
+        Int ram_gb
+        Int allocated_disk_gb
+        Int n_preemptible
+        File? enzyme_database
+    }
+
+    command <<<
+        set -euo pipefail
+
+        cromwell_root=$(pwd)
+
+        # Resource Monitoring Initialization
+        wall_start=$(date +%s%N)  # Nanoseconds since epoch
+
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_start_ns=0
+        fi
+
+        archives_dir="${cromwell_root}/work_archives_step1"
+        output_dir="${cromwell_root}/out_pulsar_step2"
+        tmp_dir="${cromwell_root}/sn_temp"
+
+        mkdir -p "${archives_dir}" "${output_dir}" "${tmp_dir}"
+
+        # Copy all intermediate .psar files from all bins
+        echo "Copying intermediate archives from all bins..."
+        while IFS= read -r archive; do
+            if [ -n "${archive}" ]; then
+                cp "${archive}" "${archives_dir}/"
+            fi
+        done < ~{write_lines(intermediate_archives)}
+
+        # Verify archives were copied
+        archive_count=$(find "${archives_dir}" -type f -name "*.psar" | wc -l)
+        echo "Copied ${archive_count} intermediate archives"
+
+        # Import enzyme database if provided
+        if [ ~{defined(enzyme_database)} = true ]; then
+            echo "Importing enzyme database..."
+            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
+        fi
+
+        # Run Pulsar Step 2 to generate .qsp optimized models
+        echo "Running Pulsar Step 2 to generate optimized models from ${archive_count} archives..."
+        spectronaut lg -se Pulsar \
+            -sad "${archives_dir}" \
+            --pulsarStage pulsarStep2 \
+            -n "~{experiment_name}" \
+            --noOutputSubfolder \
+            -o "${output_dir}" \
+            -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step2_combine.log
+
+        # Find the generated .qsp file
+        qsp_file=$(find "${output_dir}" -maxdepth 1 -type f -name "*.qsp" | head -n 1)
+
+        if [ -z "${qsp_file}" ] || [ ! -f "${qsp_file}" ]; then
+            echo "ERROR: .qsp optimized models file not found" >&2
+            echo "Output directory contents:" >&2
+            ls -lh "${output_dir}" >&2
+            exit 1
+        fi
+
+        # Move to cromwell root with standardized name
+        mv "${qsp_file}" "${cromwell_root}/optimized_models.qsp"
+        echo "Generated optimized models: optimized_models.qsp"
+
+        # ============================================================================
+        # Resource Usage Report
+        # ============================================================================
+        echo "==========================================="
+        echo "=== RESOURCE USAGE REPORT ==="
+        echo "==========================================="
+
+        # --- CPU Utilization ---
+        echo ""
+        echo "--- CPU Utilization ---"
+
+        wall_end=$(date +%s%N)
+        wall_elapsed_ns=$((wall_end - wall_start))
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_end_ns=$((cpu_end * 1000))
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_end_ns=0
+        fi
+
+        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
+            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
+            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
+                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
+            allocated_cpus=~{cpu}
+            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
+                'BEGIN { printf "%.2f", total / cpus }')
+
+            echo "Allocated CPUs: ${allocated_cpus}"
+            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
+            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
+        else
+            echo "CPU utilization data not available"
+        fi
+
+        # --- Memory Usage ---
+        echo ""
+        echo "--- Memory Usage ---"
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "$max_mem_bytes" -gt 0 ]; then
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+            echo "Actual Peak RAM: ${max_mem_gb} GB"
+
+            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
+                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
+                echo "RAM Limit: ${limit_gb} GB"
+                echo "RAM Usage: ${usage_percent}%"
+            fi
+        else
+            echo "Memory usage data not available"
+        fi
+
+        # --- Disk Usage ---
+        echo ""
+        echo "--- Disk Usage ---"
+
+        allocated_disk_gb=~{allocated_disk_gb}
+        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
+
+        if command -v df >/dev/null 2>&1; then
+            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
+
+            if [ -n "${disk_used_output}" ]; then
+                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
+                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
+                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
+
+                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Disk Usage: ${disk_usage_percent}%"
+            else
+                echo "Could not measure disk usage"
+            fi
+        else
+            echo "df command not available"
+        fi
+
+        echo ""
+        echo "==========================================="
+    >>>
+
+    output {
+        File optimized_models = "optimized_models.qsp"
+    }
+
+    runtime {
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        cpu: cpu
+        memory: "~{ram_gb}GB"
+        bootDiskSizeGb: 50
+        disks: "local-disk ~{allocated_disk_gb} HDD"
+        preemptible: n_preemptible
+        cpuPlatform: "AMD Rome"
+    }
+}
+
+task pulsar_step3_binned {
+    input {
+        File fasta_1
+        Array[File] input_files
+        File intermediate_archive
+        File optimized_models
+        String experiment_name
+        Float bin_size_gb
+        Int disk_size_multiplier
+        Int cpu
+        Int ram_gb
+        Int bin_index
+        Int allocated_disk_gb
+        Int n_preemptible
+        File? analysis_schema
+        File? fasta_2
+        File? fasta_3
+        File? enzyme_database
+    }
+
+    command <<<
+        set -euo pipefail
+
+        cromwell_root=$(pwd)
+
+        # Resource Monitoring Initialization
+        wall_start=$(date +%s%N)  # Nanoseconds since epoch
+
+        # Cgroup V2 (modern)
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
+        # Cgroup V1 (legacy)
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_start_ns=0
+        fi
+
+        input_dir="${cromwell_root}/work_input"
+        output_dir="${cromwell_root}/out_pulsar_step3"
+        tmp_dir="${cromwell_root}/sn_temp"
+
+        mkdir -p "${input_dir}" "${output_dir}" "${tmp_dir}"
+
+        # Copy ALL binned files to input_dir (same files as step 1)
+        echo "Copying input files for bin ~{bin_index}..."
+        while IFS= read -r input_file; do
+            if [ -n "${input_file}" ]; then
+                if [ -d "${input_file}" ]; then
+                    cp -r "${input_file}" "${input_dir}/"
+                elif [ -f "${input_file}" ]; then
+                    cp "${input_file}" "${input_dir}/"
+                fi
+            fi
+        done < ~{write_lines(input_files)}
+
+        # Verify files were copied
+        file_count=$(find "${input_dir}" -type f | wc -l)
+        echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
+
+        # Import enzyme database if provided
+        if [ ~{defined(enzyme_database)} = true ]; then
+            echo "Importing enzyme database..."
+            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
+        fi
+
+        # Run Pulsar Step 3 with optimized models (batch processing)
+        echo "Running Pulsar Step 3 for bin ~{bin_index} with optimized models..."
+        spectronaut lg -se Pulsar \
+            -d "${input_dir}" \
+            -sa "~{intermediate_archive}" \
+            -a "${output_dir}/search_archive_bin_~{bin_index}.psar" \
+            --optimizedModels "~{optimized_models}" \
+            --pulsarStage pulsarStep3 \
+            -o "${output_dir}" \
+            -n "~{experiment_name}_bin_~{bin_index}" \
+            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step3_bin_~{bin_index}.log
+
+        # Verify output
+        psar_file="${output_dir}/search_archive_bin_~{bin_index}.psar"
+        if [ ! -f "${psar_file}" ]; then
+            echo "ERROR: Final .psar file not found for bin ~{bin_index}" >&2
+            echo "Output directory contents:" >&2
+            ls -lh "${output_dir}" >&2
+            exit 1
+        fi
+
+        # Move to cromwell root
+        mv "${psar_file}" "${cromwell_root}/search_archive_bin_~{bin_index}.psar"
+        echo "Generated final search archive for bin ~{bin_index}"
+
+        # ============================================================================
+        # Resource Usage Report
+        # ============================================================================
+        echo "==========================================="
+        echo "=== RESOURCE USAGE REPORT ==="
+        echo "==========================================="
+
+        # --- CPU Utilization ---
+        echo ""
+        echo "--- CPU Utilization ---"
+
+        wall_end=$(date +%s%N)
+        wall_elapsed_ns=$((wall_end - wall_start))
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/cpu.stat ]; then
+            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
+            cpu_end_ns=$((cpu_end * 1000))
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
+        else
+            cpu_end_ns=0
+        fi
+
+        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
+            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
+            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
+                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
+            allocated_cpus=~{cpu}
+            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
+                'BEGIN { printf "%.2f", total / cpus }')
+
+            echo "Allocated CPUs: ${allocated_cpus}"
+            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
+            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
+        else
+            echo "CPU utilization data not available"
+        fi
+
+        # --- Memory Usage ---
+        echo ""
+        echo "--- Memory Usage ---"
+
+        # Cgroup V2
+        if [ -f /sys/fs/cgroup/memory.peak ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
+            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+        # Cgroup V1
+        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
+            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
+            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        else
+            max_mem_bytes=0
+            limit_bytes=0
+        fi
+
+        if [ "$max_mem_bytes" -gt 0 ]; then
+            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+            echo "Actual Peak RAM: ${max_mem_gb} GB"
+
+            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
+                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
+                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
+                echo "RAM Limit: ${limit_gb} GB"
+                echo "RAM Usage: ${usage_percent}%"
+            fi
+        else
+            echo "Memory usage data not available"
+        fi
+
+        # --- Disk Usage ---
+        echo ""
+        echo "--- Disk Usage ---"
+
+        allocated_disk_gb=~{allocated_disk_gb}
+        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
+
+        if command -v df >/dev/null 2>&1; then
+            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
+
+            if [ -n "${disk_used_output}" ]; then
+                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
+                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
+                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
+
+                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Disk Usage: ${disk_usage_percent}%"
+            else
+                echo "Could not measure disk usage"
+            fi
+        else
+            echo "df command not available"
+        fi
+
+        echo ""
+        echo "==========================================="
+    >>>
+
+    output {
+        File final_archive = "search_archive_bin_~{bin_index}.psar"
+    }
+
+    runtime {
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        cpu: cpu
+        memory: "~{ram_gb}GB"
+        bootDiskSizeGb: 50
+        disks: "local-disk ~{allocated_disk_gb} HDD"
+        preemptible: n_preemptible
+        cpuPlatform: "AMD Rome"
+    }
+}
+
+task combine_final_archives {
     input {
         Array[File] input_archives
         Float total_input_size_gb
@@ -1201,6 +1384,7 @@ task combine_archives {
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
+        File? analysis_schema
     }
 
     command <<<
@@ -1243,7 +1427,9 @@ task combine_archives {
         spectronaut lg -se Pulsar \
             -sad "${work_archives}" \
             -k "${cromwell_root}/${merged_library}" \
-            -o "${cromwell_root}" 2>&1 | tee merge_archives.log
+            -o "${cromwell_root}" \
+            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            2>&1 | tee merge_archives.log
 
         if [ ! -f "${cromwell_root}/${merged_library}" ]; then
             echo "ERROR: Merged archive file not found" >&2
@@ -1359,7 +1545,6 @@ task combine_archives {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: combine_archives_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1420,8 +1605,12 @@ task dia_analysis_binned {
         # Copy all input files to input directory
         echo "Copying input files..."
         while IFS= read -r input_file; do
-            if [ -n "${input_file}" ] && [ -f "${input_file}" ]; then
-                cp "${input_file}" "${input_dir}/"
+            if [ -n "${input_file}" ]; then
+                if [ -d "${input_file}" ]; then
+                    cp -r "${input_file}" "${input_dir}/"
+                elif [ -f "${input_file}" ]; then
+                    cp "${input_file}" "${input_dir}/"
+                fi
             fi
         done < ~{write_lines(input_files)}
 
@@ -1431,65 +1620,36 @@ task dia_analysis_binned {
             dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        # Process each file individually for DIA analysis
-        echo "Processing files individually for DIA analysis..."
-        file_count=0
-        for input_file in "${input_dir}"/*; do
-            # Skip if not a regular file
-            if [ ! -f "${input_file}" ]; then
-                continue
-            fi
+        # Verify files were copied
+        file_count=$(find "${input_dir}" -type f | wc -l)
+        echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
 
-            # Extract basename without any extension
-            full_basename=$(basename "${input_file}")
-            base_name="${full_basename%.*}"
+        # Run DIA analysis on ALL files in bin at once (batch processing)
+        echo "Running DIA analysis for bin ~{bin_index} (batch processing ${file_count} files)..."
+        spectronaut diaanalysis \
+            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            -fasta "~{fasta_1}" \
+            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+            ~{if defined(json_settings) then "-j " + json_settings else ""} \
+            -n "~{experiment_name}_bin_~{bin_index}" \
+            -o "${output_dir}" \
+            -d "${input_dir}" \
+            -a "~{search_archive}" \
+            -setTemp "${tmp_dir}" 2>&1 | tee dia_analysis_bin_~{bin_index}.log
 
-            # Create individual temp directories
-            file_input_dir="${cromwell_root}/input_${base_name}"
-            file_output_dir="${cromwell_root}/output_${base_name}"
-            file_tmp_dir="${cromwell_root}/temp_${base_name}"
-
-            mkdir -p "${file_input_dir}" "${file_output_dir}" "${file_tmp_dir}"
-
-            # Copy single file
-            cp "${input_file}" "${file_input_dir}/"
-
-            echo "Processing ${base_name} for DIA analysis..."
-            spectronaut diaanalysis \
-                ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-                -fasta "~{fasta_1}" \
-                ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
-                ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-                ~{if defined(json_settings) then "-j " + json_settings else ""} \
-                -n "~{experiment_name}_bin_~{bin_index}_${base_name}" \
-                -o "${file_output_dir}" \
-                -d "${file_input_dir}" \
-                -a "~{search_archive}" \
-                -setTemp "${file_tmp_dir}" 2>&1 | tee "dia_analysis_${base_name}.log"
-
-            # Find and rename the .sne file
-            sne_file=$(find "${file_output_dir}" -type f -name "*.sne" | head -n 1)
-
-            if [ -z "${sne_file}" ] || [ ! -f "${sne_file}" ]; then
-                echo "ERROR: No .sne file produced for ${base_name}" >&2
-                exit 1
-            fi
-
-            # Move to cromwell root with unique name
-            output_name="~{experiment_name}_bin_~{bin_index}_${base_name}.sne"
-            mv "${sne_file}" "${cromwell_root}/${output_name}"
-            echo "Generated ${output_name}"
-
-            file_count=$((file_count + 1))
-        done
-
-        if [ "${file_count}" -eq 0 ]; then
-            echo "ERROR: No files were processed successfully" >&2
+        # Find all .sne files produced
+        sne_count=$(find "${output_dir}" -type f -name "*.sne" | wc -l)
+        if [ "${sne_count}" -eq 0 ]; then
+            echo "ERROR: No .sne files produced for bin ~{bin_index}" >&2
             exit 1
         fi
 
-        echo "DIA analysis complete. Generated ${file_count} SNE files for bin ~{
-            bin_index}"
+        # Move all .sne files to cromwell root
+        echo "Moving ${sne_count} SNE files..."
+        find "${output_dir}" -type f -name "*.sne" -exec mv {} "${cromwell_root}/" \;
+
+        echo "DIA analysis complete for bin ~{bin_index}. Generated ${sne_count} SNE files."
 
         # ============================================================================
         # Resource Usage Report
@@ -1598,7 +1758,6 @@ task dia_analysis_binned {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: dia_analysis_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
@@ -1795,7 +1954,6 @@ task combine_sne {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        predefinedMachineType: combine_sne_machine
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 50
