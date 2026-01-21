@@ -5,12 +5,14 @@ version development
 # Phase II: Intelligent Binning - Distribute files across n VMs
 # Phase III: Conditional Execution - Single VM (num_vms=1) or Parallel Multi-Step (num_vms>1)
 #   Parallel Mode:
-#     Step 1.1: Generate intermediate search archives per bin
-#     Step 1.2: Combine archives to train optimized models (.qsp)
-#     Step 1.3: Generate final search archives with optimized models
-#     Step 1.4: Merge final archives into search library (.kit)
-#     Step 2: DIA analysis per bin against merged library
-#     Step 3: Combine SNE files and generate reports
+#     Step 1.1: Generate intermediate search archives per bin (uses Pulsar_search_settings)
+#     Step 1.2: Combine archives to train optimized models (.qsp) (uses Pulsar_search_settings)
+#     Step 1.3: Generate final search archives with optimized models (uses Pulsar_search_settings)
+#     Step 1.4: Merge final archives into search library (.kit) (uses library_generation_settings)
+#     Step 2: DIA analysis per bin against merged library (uses DIA_analysis_settings)
+#     Step 3: Combine SNE files and generate reports (uses DIA_analysis_settings)
+#   Single VM Mode:
+#     DirectDIA search and analysis in one step (uses directDIA_settings)
 workflow parallel_spectronaut {
     input {
         File fasta_1  # Primary FASTA database file (required)
@@ -30,7 +32,10 @@ workflow parallel_spectronaut {
         # ============================================================================
         # Analysis Settings & Schemas
         # ============================================================================
-        File? search_settings  # Settings for directDIA search and DIA analysis
+        File? Pulsar_search_settings  # Settings for Pulsar steps (step1, step2, step3)
+        File? library_generation_settings  # Settings for combining archives into library
+        File? directDIA_settings  # Settings for directDIA single VM mode
+        File? DIA_analysis_settings  # Settings for DIA analysis and SNE combine
         File? json_settings  # JSON settings for Spectronaut
         File? condition_setup  # Experimental condition setup
 
@@ -66,73 +71,72 @@ workflow parallel_spectronaut {
     # Compute preset configurations based on experiment_type
     # Pulsar Step 1: Generate intermediate search archives (similar to directDIA search)
     Map[String, Int] pulsar_step1_cpu_presets = {
-        "proteome": 32,
-        "ptm": 48,
+        "proteome": 16,
+        "ptm": 24,
     }
     Map[String, Int] pulsar_step1_ram_gb_presets = {
-        "proteome": 80,
-        "ptm": 120,
+        "proteome": 48,
+        "ptm": 72,
     }
 
     # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
     Map[String, Int] pulsar_step2_cpu_presets = {
-        "proteome": 16,
-        "ptm": 24,
+        "proteome": 8,
+        "ptm": 12,
     }
     Map[String, Int] pulsar_step2_ram_gb_presets = {
-        "proteome": 64,
-        "ptm": 96,
+        "proteome": 48,
+        "ptm": 72,
     }
 
     # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
     Map[String, Int] pulsar_step3_cpu_presets = {
-        "proteome": 32,
-        "ptm": 48,
+        "proteome": 16,
+        "ptm": 24,
     }
     Map[String, Int] pulsar_step3_ram_gb_presets = {
-        "proteome": 80,
-        "ptm": 120,
+        "proteome": 64,
+        "ptm": 96,
     }
 
     # Combine final archives into .kit library
     Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 16,
-        "ptm": 16,
+        "proteome": 12,
+        "ptm": 12,
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 50,
-        "ptm": 80,
+        "proteome": 48,
+        "ptm": 72,
     }
 
     # DirectDIA single VM (does both search and analysis in one step)
     Map[String, Int] directDIA_single_vm_cpu_presets = {
         "proteome": 32,
-        "ptm": 48,
+        "ptm": 64,
     }
     Map[String, Int] directDIA_single_vm_ram_gb_presets = {
-        "proteome": 80,
-        "ptm": 120,
+        "proteome": 128,
+        "ptm": 256,
     }
 
     # DIA analysis per bin (after library is created)
     Map[String, Int] dia_analysis_cpu_presets = {
-        "proteome": 32,
-        "ptm": 48,
+        "proteome": 16,
+        "ptm": 24,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
-        "proteome": 80,
-        "ptm": 120,
+        "proteome": 64,
+        "ptm": 96,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
-        "proteome": 16,
-        "ptm": 16,
+        "proteome": 12,
+        "ptm": 12,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 40,
-        "ptm": 80,
+        "proteome": 32,
+        "ptm": 48,
     }
-
 
     # Validate experiment_type and fallback to "proteome" if invalid
     String validated_experiment_type = if (experiment_type == "proteome" || experiment_type
@@ -152,7 +156,8 @@ workflow parallel_spectronaut {
     Int combine_archives_ram_gb = combine_archives_ram_gb_presets[
         validated_experiment_type]
 
-    Int directDIA_single_vm_cpu = directDIA_single_vm_cpu_presets[validated_experiment_type]
+    Int directDIA_single_vm_cpu = directDIA_single_vm_cpu_presets[
+        validated_experiment_type]
     Int directDIA_single_vm_ram_gb = directDIA_single_vm_ram_gb_presets[
         validated_experiment_type]
 
@@ -203,7 +208,7 @@ workflow parallel_spectronaut {
             input_files = flatten(file_bins),
             total_size_gb = total_input_size_gb,
             disk_size_multiplier = disk_size_multiplier,
-            analysis_schema = search_settings,
+            analysis_schema = directDIA_settings,
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
             fasta_3 = fasta_3,
@@ -233,7 +238,7 @@ workflow parallel_spectronaut {
         scatter (i in range(length(file_bins))) {
             call pulsar_step1_binned { input:
                 input_files = file_bins[i],
-                analysis_schema = search_settings,
+                analysis_schema = Pulsar_search_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
@@ -262,6 +267,7 @@ workflow parallel_spectronaut {
             cpu = pulsar_step2_cpu,
             ram_gb = pulsar_step2_ram_gb,
             enzyme_database = enzyme_database,
+            analysis_schema = Pulsar_search_settings,
             n_preemptible = n_preemptible_pulsar_step2,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
@@ -275,7 +281,7 @@ workflow parallel_spectronaut {
                 intermediate_archive = pulsar_step1_binned.intermediate_archive[i],
                 optimized_models = pulsar_step2_combine_models.optimized_models,
                 experiment_name = experiment_name,
-                analysis_schema = search_settings,
+                analysis_schema = Pulsar_search_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
@@ -303,7 +309,7 @@ workflow parallel_spectronaut {
             cpu = combine_archives_cpu,
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
-            analysis_schema = search_settings,
+            analysis_schema = library_generation_settings,
             n_preemptible = n_preemptible_combine_archives,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
@@ -316,7 +322,7 @@ workflow parallel_spectronaut {
                 experiment_name = experiment_name,
                 input_files = file_bins[i],
                 search_archive = combine_final_archives.merged_archive,
-                analysis_schema = search_settings,
+                analysis_schema = DIA_analysis_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
@@ -340,7 +346,7 @@ workflow parallel_spectronaut {
         call combine_sne { input:
             experiment_name = experiment_name,
             sne_files = all_sne,
-            analysis_schema = search_settings,
+            analysis_schema = DIA_analysis_settings,
             condition_setup = condition_setup,
             report_schema_1 = report_schema_1,
             report_schema_2 = report_schema_2,
@@ -494,7 +500,6 @@ task create_bins {
     }
 }
 
-
 task calculate_directory_size_gcs {
     input {
         String gcs_directory_path
@@ -538,7 +543,6 @@ task calculate_directory_size_gcs {
         cpuPlatform: "AMD Rome"
     }
 }
-
 
 task directDIA_single_vm {
     input {
@@ -980,6 +984,7 @@ task pulsar_step2_combine_models {
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
+        File? analysis_schema
     }
 
     command <<<
@@ -1031,6 +1036,7 @@ task pulsar_step2_combine_models {
             -sad "${archives_dir}" \
             --pulsarStage pulsarStep2 \
             -n "~{experiment_name}" \
+            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
             --noOutputSubfolder \
             -o "${output_dir}" \
             -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step2_combine.log
@@ -1168,9 +1174,9 @@ task pulsar_step2_combine_models {
 task pulsar_step3_binned {
     input {
         File fasta_1
-        Array[File] input_files
         File intermediate_archive
         File optimized_models
+        Array[File] input_files
         String experiment_name
         Float bin_size_gb
         Int disk_size_multiplier
