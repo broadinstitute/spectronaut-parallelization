@@ -71,42 +71,42 @@ workflow parallel_spectronaut {
     # Compute preset configurations based on experiment_type
     # Pulsar Step 1: Generate intermediate search archives (similar to directDIA search)
     Map[String, Int] pulsar_step1_cpu_presets = {
-        "proteome": 16,
-        "ptm": 24,
+        "proteome": 32,
+        "ptm": 48,
     }
     Map[String, Int] pulsar_step1_ram_gb_presets = {
-        "proteome": 48,
-        "ptm": 72,
+        "proteome": 32,
+        "ptm": 32,
     }
 
     # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
     Map[String, Int] pulsar_step2_cpu_presets = {
-        "proteome": 8,
-        "ptm": 12,
-    }
-    Map[String, Int] pulsar_step2_ram_gb_presets = {
-        "proteome": 48,
-        "ptm": 72,
-    }
-
-    # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
-    Map[String, Int] pulsar_step3_cpu_presets = {
         "proteome": 16,
         "ptm": 24,
     }
-    Map[String, Int] pulsar_step3_ram_gb_presets = {
+    Map[String, Int] pulsar_step2_ram_gb_presets = {
         "proteome": 64,
         "ptm": 96,
     }
 
+    # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
+    Map[String, Int] pulsar_step3_cpu_presets = {
+        "proteome": 32,
+        "ptm": 48,
+    }
+    Map[String, Int] pulsar_step3_ram_gb_presets = {
+        "proteome": 32,
+        "ptm": 32,
+    }
+
     # Combine final archives into .kit library
     Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 12,
-        "ptm": 12,
+        "proteome": 16,
+        "ptm": 24,
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 48,
-        "ptm": 72,
+        "proteome": 64,
+        "ptm": 96,
     }
 
     # DirectDIA single VM (does both search and analysis in one step)
@@ -130,12 +130,12 @@ workflow parallel_spectronaut {
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
-        "proteome": 12,
-        "ptm": 12,
+        "proteome": 16,
+        "ptm": 16,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 32,
-        "ptm": 48,
+        "proteome": 64,
+        "ptm": 96,
     }
 
     # Validate experiment_type and fallback to "proteome" if invalid
