@@ -213,7 +213,7 @@ workflow parallel_spectronaut {
         # Scatter over each individual file (one file per VM)
         scatter (input_file in all_input_files) {
             call htrms_conversion { input:
-                input_file = input_file,
+                input_file_path = input_file,
                 convert_schema = convert_schema,
                 n_preemptible = n_preemptible_htrms_conversion,
             }
@@ -585,13 +585,10 @@ task calculate_directory_size_gcs {
 
 task htrms_conversion {
     input {
-        File input_file
+        String input_file_path
         Int n_preemptible
         File? convert_schema
     }
-
-    # Calculate disk size based on input file
-    Int disk_size = ceil(size(input_file, "GB") * 5) + 50
 
     command <<<
         set -euo pipefail
@@ -607,12 +604,7 @@ task htrms_conversion {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy input file (supports both files and directories like .d folders)
-        if [ -d "~{input_file}" ]; then
-            cp -r "~{input_file}" "${input_dir}/"
-        else
-            cp "~{input_file}" "${input_dir}/"
-        fi
+        gcloud storage cp -r "~{input_file_path}" "${input_dir}/"
 
         # Run HTRMS conversion
         echo "Running HTRMS conversion..."
@@ -631,7 +623,7 @@ task htrms_conversion {
         fi
 
         # Extract basename and rename
-        input_basename=$(basename "~{input_file}")
+        input_basename=$(basename "~{input_file_path}")
         output_filename="${input_basename%.*}.htrms"
 
         mv "${htrms_file}" "${cromwell_root}/${output_filename}"
@@ -639,15 +631,15 @@ task htrms_conversion {
     >>>
 
     output {
-        File htrms_file = glob("*.htrms")[0]
+        File htrms_file = "~{sub(basename(input_file_path), "\\.[^.]+$", "")}.htrms"
     }
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        cpu: 32
-        memory: "64GB"
-        bootDiskSizeGb: 50
-        disks: "local-disk ~{disk_size} HDD"
+        cpu: 16
+        memory: "32GB"
+        bootDiskSizeGb: 32
+        disks: "local-disk 300 HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
     }
@@ -914,7 +906,7 @@ task directDIA_single_vm {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 50
+        bootDiskSizeGb: 32
         disks: "local-disk ~{ceil(total_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
@@ -1123,7 +1115,7 @@ task pulsar_step1_binned {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 50
+        bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
@@ -1321,7 +1313,7 @@ task pulsar_step2_combine_models {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 50
+        bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
@@ -1530,7 +1522,7 @@ task pulsar_step3_binned {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 50
+        bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
@@ -1710,7 +1702,7 @@ task combine_final_archives {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 50
+        bootDiskSizeGb: 32
         disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
@@ -1923,7 +1915,7 @@ task dia_analysis_binned {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 50
+        bootDiskSizeGb: 32
         disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
@@ -2119,7 +2111,7 @@ task combine_sne {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
         cpu: cpu
         memory: "~{ram_gb}GB"
-        bootDiskSizeGb: 50
+        bootDiskSizeGb: 32
         disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
