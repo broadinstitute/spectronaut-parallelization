@@ -5,14 +5,14 @@ version development
 # Phase II: Intelligent Binning - Distribute files across n VMs
 # Phase III: Conditional Execution - Single VM (num_vms=1) or Parallel Multi-Step (num_vms>1)
 #   Parallel Mode:
-#     Step 1.1: Generate intermediate search archives per bin (uses search_settings_pulsar)
-#     Step 1.2: Combine archives to train optimized models (.qsp) (uses search_settings_pulsar)
-#     Step 1.3: Generate final search archives with optimized models (uses search_settings_pulsar)
-#     Step 1.4: Merge final archives into search library (.kit) (uses search_settings_library_generation)
-#     Step 2: DIA analysis per bin against merged library (uses search_settings_DIA_analysis)
-#     Step 3: Combine SNE files and generate reports (uses search_settings_DIA_analysis)
+#     Step 1.1: Generate intermediate search archives per bin (uses search_settings_01_Pulsar_search)
+#     Step 1.2: Combine archives to train optimized models (.qsp) (uses search_settings_01_Pulsar_search)
+#     Step 1.3: Generate final search archives with optimized models (uses search_settings_01_Pulsar_search)
+#     Step 1.4: Merge final archives into search library (.kit) (uses search_settings_02_library_generation)
+#     Step 2: DIA analysis per bin against merged library (uses search_settings_03_DIA_analysis)
+#     Step 3: Combine SNE files and generate reports (uses search_settings_03_DIA_analysis)
 #   Single VM Mode:
-#     DirectDIA search and analysis in one step (uses search_settings_directDIA)
+#     DirectDIA search and analysis in one step (uses search_settings_00_directDIA)
 workflow parallel_spectronaut {
     input {
         File fasta_1  # Primary FASTA database file (required)
@@ -32,10 +32,10 @@ workflow parallel_spectronaut {
         # ============================================================================
         # Analysis Settings & Schemas
         # ============================================================================
-        File? search_settings_pulsar  # Settings for Pulsar steps (step1, step2, step3)
-        File? search_settings_library_generation  # Settings for combining archives into library
-        File? search_settings_directDIA  # Settings for directDIA single VM mode
-        File? search_settings_DIA_analysis  # Settings for DIA analysis and SNE combine
+        File? search_settings_01_Pulsar_search  # Settings for Pulsar steps (step1, step2, step3)
+        File? search_settings_02_library_generation  # Settings for combining archives into library
+        File? search_settings_00_directDIA  # Settings for directDIA single VM mode
+        File? search_settings_03_DIA_analysis  # Settings for DIA analysis and SNE combine
         File? json_settings  # JSON settings for Spectronaut
         File? condition_setup  # Experimental condition setup
 
@@ -246,7 +246,7 @@ workflow parallel_spectronaut {
             input_files = files_for_search,
             total_size_gb = total_input_size_gb,
             disk_size_multiplier = disk_size_multiplier,
-            analysis_schema = search_settings_directDIA,
+            analysis_schema = search_settings_00_directDIA,
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
             fasta_3 = fasta_3,
@@ -276,7 +276,7 @@ workflow parallel_spectronaut {
         scatter (i in range(length(search_file_bins))) {
             call pulsar_step1_binned { input:
                 input_files = search_file_bins[i],
-                analysis_schema = search_settings_pulsar,
+                analysis_schema = search_settings_01_Pulsar_search,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
@@ -305,7 +305,7 @@ workflow parallel_spectronaut {
             cpu = pulsar_step2_cpu,
             ram_gb = pulsar_step2_ram_gb,
             enzyme_database = enzyme_database,
-            analysis_schema = search_settings_pulsar,
+            analysis_schema = search_settings_01_Pulsar_search,
             n_preemptible = n_preemptible_pulsar_step2,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
@@ -319,7 +319,7 @@ workflow parallel_spectronaut {
                 intermediate_archive = pulsar_step1_binned.intermediate_archive[i],
                 optimized_models = pulsar_step2_combine_models.optimized_models,
                 experiment_name = experiment_name,
-                analysis_schema = search_settings_pulsar,
+                analysis_schema = search_settings_01_Pulsar_search,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
@@ -347,7 +347,7 @@ workflow parallel_spectronaut {
             cpu = combine_archives_cpu,
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
-            analysis_schema = search_settings_library_generation,
+            analysis_schema = search_settings_02_library_generation,
             n_preemptible = n_preemptible_combine_archives,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
@@ -360,7 +360,7 @@ workflow parallel_spectronaut {
                 experiment_name = experiment_name,
                 input_files = search_file_bins[i],
                 search_archive = combine_final_archives.merged_archive,
-                analysis_schema = search_settings_DIA_analysis,
+                analysis_schema = search_settings_03_DIA_analysis,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
@@ -385,7 +385,7 @@ workflow parallel_spectronaut {
         call combine_sne { input:
             experiment_name = experiment_name,
             sne_files = all_sne,
-            analysis_schema = search_settings_DIA_analysis,
+            analysis_schema = search_settings_03_DIA_analysis,
             condition_setup = condition_setup,
             report_schema_1 = report_schema_1,
             report_schema_2 = report_schema_2,
