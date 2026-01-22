@@ -221,10 +221,11 @@ workflow parallel_spectronaut {
     }
 
     # Select converted files or original files
-    Array[File] files_for_search = select_first([
-        htrms_conversion.htrms_file,
-        all_input_files,
-    ])
+    # htrms_conversion.htrms_file is Array[Array[File]]? due to conditional block
+    # Use select_first to handle the optional, then flatten
+    Array[File] files_for_search = if defined(htrms_conversion.htrms_file)
+        then flatten(select_first([htrms_conversion.htrms_file]))
+        else all_input_files
 
     # Re-bin the files (converted or original) for downstream parallel tasks
     call create_search_bins { input:
@@ -292,7 +293,7 @@ workflow parallel_spectronaut {
         }
 
         # Collect all intermediate archives (one per bin)
-        Array[File] intermediate_archives = pulsar_step1_binned.intermediate_archive
+        Array[File] intermediate_archives = flatten(pulsar_step1_binned.intermediate_archive)
 
         # ========================================================================
         # STEP 1.2: Combine intermediate archives to generate optimized models
@@ -316,8 +317,8 @@ workflow parallel_spectronaut {
         scatter (i in range(length(search_file_bins))) {
             call pulsar_step3_binned { input:
                 input_files = search_file_bins[i],
-                intermediate_archive = pulsar_step1_binned.intermediate_archive[i],
-                optimized_models = pulsar_step2_combine_models.optimized_models,
+                intermediate_archive = pulsar_step1_binned.intermediate_archive[i][0],
+                optimized_models = pulsar_step2_combine_models.optimized_models[0],
                 experiment_name = experiment_name,
                 analysis_schema = search_settings_01_Pulsar_search,
                 fasta_1 = fasta_1,
@@ -335,7 +336,7 @@ workflow parallel_spectronaut {
         }
 
         # Collect all final archives (one per bin)
-        Array[File] final_archives = pulsar_step3_binned.final_archive
+        Array[File] final_archives = flatten(pulsar_step3_binned.final_archive)
 
         # ========================================================================
         # STEP 1.4: Merge final search archives into single .kit library
@@ -614,24 +615,19 @@ task htrms_conversion {
             ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
             -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
 
-        # Find and move the converted file
-        htrms_file=$(find "${output_dir}" -type f -name "*.htrms" -print -quit)
-
-        if [ -z "${htrms_file}" ]; then
+        # Find and move the converted file(s)
+        htrms_count=$(find "${output_dir}" -type f -name "*.htrms" | wc -l)
+        if [ "${htrms_count}" -eq 0 ]; then
             echo "ERROR: No .htrms file produced" >&2
             exit 1
         fi
-
-        # Extract basename and rename
-        input_basename=$(basename "~{input_file_path}")
-        output_filename="${input_basename%.*}.htrms"
-
-        mv "${htrms_file}" "${cromwell_root}/${output_filename}"
-        echo "Converted to: ${output_filename}"
+        echo "Moving ${htrms_count} HTRMS file(s)..."
+        find "${output_dir}" -type f -name "*.htrms" -exec mv {} "${cromwell_root}/" \;
+        echo "Conversion complete"
     >>>
 
     output {
-        File htrms_file = "~{sub(basename(input_file_path), "\\.[^.]+$", "")}.htrms"
+        Array[File] htrms_file = glob("*.htrms")
     }
 
     runtime {
@@ -993,18 +989,17 @@ task pulsar_step1_binned {
             -o "${output_dir}" \
             -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step1_bin_~{bin_index}.log
 
-        # Verify output
-        psar_file="${output_dir}/search_archive_step1_bin_~{bin_index}.psar"
-        if [ ! -f "${psar_file}" ]; then
-            echo "ERROR: Intermediate .psar file not found for bin ~{bin_index}" >&2
+        # Verify output and move to cromwell root
+        psar_count=$(find "${output_dir}" -type f -name "*.psar" | wc -l)
+        if [ "${psar_count}" -eq 0 ]; then
+            echo "ERROR: No .psar file produced for bin ~{bin_index}" >&2
             echo "Output directory contents:" >&2
             ls -lh "${output_dir}" >&2
             exit 1
         fi
-
-        # Move to cromwell root
-        mv "${psar_file}" "${cromwell_root}/search_archive_step1_bin_~{bin_index}.psar"
-        echo "Generated intermediate search archive: search_archive_step1_bin_~{bin_index}.psar"
+        echo "Moving ${psar_count} PSAR file(s)..."
+        find "${output_dir}" -type f -name "*.psar" -exec mv {} "${cromwell_root}/" \;
+        echo "Generated intermediate search archive for bin ~{bin_index}"
 
         # ============================================================================
         # Resource Usage Report
@@ -1108,7 +1103,7 @@ task pulsar_step1_binned {
     >>>
 
     output {
-        File intermediate_archive = "search_archive_step1_bin_~{bin_index}.psar"
+        Array[File] intermediate_archive = glob("*.psar")
     }
 
     runtime {
@@ -1190,19 +1185,17 @@ task pulsar_step2_combine_models {
             -o "${output_dir}" \
             -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step2_combine.log
 
-        # Find the generated .qsp file
-        qsp_file=$(find "${output_dir}" -maxdepth 1 -type f -name "*.qsp" | head -n 1)
-
-        if [ -z "${qsp_file}" ] || [ ! -f "${qsp_file}" ]; then
-            echo "ERROR: .qsp optimized models file not found" >&2
+        # Verify output and move to cromwell root
+        qsp_count=$(find "${output_dir}" -type f -name "*.qsp" | wc -l)
+        if [ "${qsp_count}" -eq 0 ]; then
+            echo "ERROR: No .qsp optimized models file produced" >&2
             echo "Output directory contents:" >&2
             ls -lh "${output_dir}" >&2
             exit 1
         fi
-
-        # Move to cromwell root with standardized name
-        mv "${qsp_file}" "${cromwell_root}/optimized_models.qsp"
-        echo "Generated optimized models: optimized_models.qsp"
+        echo "Moving ${qsp_count} QSP file(s)..."
+        find "${output_dir}" -type f -name "*.qsp" -exec mv {} "${cromwell_root}/" \;
+        echo "Generated optimized models"
 
         # ============================================================================
         # Resource Usage Report
@@ -1306,7 +1299,7 @@ task pulsar_step2_combine_models {
     >>>
 
     output {
-        File optimized_models = "optimized_models.qsp"
+        Array[File] optimized_models = glob("*.qsp")
     }
 
     runtime {
@@ -1400,17 +1393,16 @@ task pulsar_step3_binned {
             ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
             -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step3_bin_~{bin_index}.log
 
-        # Verify output
-        psar_file="${output_dir}/search_archive_bin_~{bin_index}.psar"
-        if [ ! -f "${psar_file}" ]; then
-            echo "ERROR: Final .psar file not found for bin ~{bin_index}" >&2
+        # Verify output and move to cromwell root
+        psar_count=$(find "${output_dir}" -type f -name "*.psar" | wc -l)
+        if [ "${psar_count}" -eq 0 ]; then
+            echo "ERROR: No .psar file produced for bin ~{bin_index}" >&2
             echo "Output directory contents:" >&2
             ls -lh "${output_dir}" >&2
             exit 1
         fi
-
-        # Move to cromwell root
-        mv "${psar_file}" "${cromwell_root}/search_archive_bin_~{bin_index}.psar"
+        echo "Moving ${psar_count} PSAR file(s)..."
+        find "${output_dir}" -type f -name "*.psar" -exec mv {} "${cromwell_root}/" \;
         echo "Generated final search archive for bin ~{bin_index}"
 
         # ============================================================================
@@ -1515,7 +1507,7 @@ task pulsar_step3_binned {
     >>>
 
     output {
-        File final_archive = "search_archive_bin_~{bin_index}.psar"
+        Array[File] final_archive = glob("*.psar")
     }
 
     runtime {

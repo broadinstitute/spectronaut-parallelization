@@ -56,10 +56,11 @@ workflow panoply_spectronaut {
     }
 
     # Select converted files or original files for search
-    Array[File] files_for_search = select_first([
-        convert_htrms.htrms_file,
-        input_files,
-    ])
+    # convert_htrms.htrms_file is Array[Array[File]]? due to conditional block
+    # Use defined() check with select_first to handle the optional, then flatten
+    Array[File] files_for_search = if defined(convert_htrms.htrms_file)
+        then flatten(select_first([convert_htrms.htrms_file]))
+        else input_files
 
     if (do_search) {
         call spectronaut { input:
@@ -162,24 +163,19 @@ task convert_htrms {
             ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
             -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
 
-        # Find and move the converted file
-        htrms_file=$(find "${output_dir}" -type f -name "*.htrms" -print -quit)
-
-        if [ -z "${htrms_file}" ]; then
+        # Find and move the converted file(s)
+        htrms_count=$(find "${output_dir}" -type f -name "*.htrms" | wc -l)
+        if [ "${htrms_count}" -eq 0 ]; then
             echo "ERROR: No .htrms file produced" >&2
             exit 1
         fi
-
-        # Extract basename and rename
-        input_basename=$(basename "~{input_file_path}")
-        output_filename="${input_basename%.*}.htrms"
-
-        mv "${htrms_file}" "${cromwell_root}/${output_filename}"
-        echo "=== Converted to: ${output_filename} ===" >&2
+        echo "Moving ${htrms_count} HTRMS file(s)..." >&2
+        find "${output_dir}" -type f -name "*.htrms" -exec mv {} "${cromwell_root}/" \;
+        echo "=== Conversion complete ===" >&2
     >>>
 
     output {
-        File htrms_file = "~{sub(basename(input_file_path), "\\.[^.]+$", "")}.htrms"
+        Array[File] htrms_file = glob("*.htrms")
     }
 
     runtime {
