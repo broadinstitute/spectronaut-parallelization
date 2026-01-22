@@ -655,7 +655,7 @@ task htrms_conversion {
 
 task create_search_bins {
     input {
-        Array[File] files
+        Array[String] file_paths
         Int num_bins
     }
 
@@ -663,7 +663,7 @@ task create_search_bins {
                 python3 <<CODE
         import json
 
-        with open("~{write_lines(files)}") as f:
+        with open("~{write_lines(file_paths)}") as f:
             files = [line.strip() for line in f if line.strip()]
 
         num_bins = ~{num_bins}
