@@ -440,11 +440,11 @@ task list_files {
 
     runtime {
         docker: "google/cloud-sdk:slim"
-        cpu: 2
-        memory: "8GB"
+        cpu: 4
+        memory: "16GB"
+        preemptible: 2
         bootDiskSizeGb: 20
         disks: "local-disk 50 HDD"
-        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -531,11 +531,11 @@ task create_bins {
 
     runtime {
         docker: "python:3.9-slim"
-        cpu: 2
-        memory: "8GB"
+        cpu: 4
+        memory: "16GB"
+        preemptible: 2
         bootDiskSizeGb: 20
         disks: "local-disk 50 HDD"
-        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -575,11 +575,11 @@ task calculate_directory_size_gcs {
 
     runtime {
         docker: "google/cloud-sdk:slim"
-        cpu: 2
-        memory: "8GB"
+        cpu: 4
+        memory: "16GB"
+        preemptible: 2
         bootDiskSizeGb: 20
         disks: "local-disk 50 HDD"
-        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -644,8 +644,8 @@ task htrms_conversion {
 
     runtime {
         docker: "broadcptacdev/panoply_spectronaut:v20.3"
-        cpu: 16
-        memory: "32GB"
+        cpu: 32
+        memory: "64GB"
         bootDiskSizeGb: 50
         disks: "local-disk ~{disk_size} HDD"
         preemptible: n_preemptible
@@ -693,11 +693,11 @@ task create_search_bins {
 
     runtime {
         docker: "python:3.9-slim"
-        cpu: 2
-        memory: "8GB"
+        cpu: 4
+        memory: "16GB"
+        preemptible: 2
         bootDiskSizeGb: 20
         disks: "local-disk 50 HDD"
-        cpuPlatform: "AMD Rome"
     }
 }
 
