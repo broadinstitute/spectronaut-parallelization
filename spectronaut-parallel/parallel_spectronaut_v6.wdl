@@ -5,14 +5,14 @@ version development
 # Phase II: Intelligent Binning - Distribute files across n VMs
 # Phase III: Conditional Execution - Single VM (num_vms=1) or Parallel Multi-Step (num_vms>1)
 #   Parallel Mode:
-#     Step 1.1: Generate intermediate search archives per bin (uses Pulsar_search_settings)
-#     Step 1.2: Combine archives to train optimized models (.qsp) (uses Pulsar_search_settings)
-#     Step 1.3: Generate final search archives with optimized models (uses Pulsar_search_settings)
-#     Step 1.4: Merge final archives into search library (.kit) (uses library_generation_settings)
-#     Step 2: DIA analysis per bin against merged library (uses DIA_analysis_settings)
-#     Step 3: Combine SNE files and generate reports (uses DIA_analysis_settings)
+#     Step 1.1: Generate intermediate search archives per bin (uses search_settings_pulsar)
+#     Step 1.2: Combine archives to train optimized models (.qsp) (uses search_settings_pulsar)
+#     Step 1.3: Generate final search archives with optimized models (uses search_settings_pulsar)
+#     Step 1.4: Merge final archives into search library (.kit) (uses search_settings_library_generation)
+#     Step 2: DIA analysis per bin against merged library (uses search_settings_DIA_analysis)
+#     Step 3: Combine SNE files and generate reports (uses search_settings_DIA_analysis)
 #   Single VM Mode:
-#     DirectDIA search and analysis in one step (uses directDIA_settings)
+#     DirectDIA search and analysis in one step (uses search_settings_directDIA)
 workflow parallel_spectronaut {
     input {
         File fasta_1  # Primary FASTA database file (required)
@@ -32,10 +32,10 @@ workflow parallel_spectronaut {
         # ============================================================================
         # Analysis Settings & Schemas
         # ============================================================================
-        File? Pulsar_search_settings  # Settings for Pulsar steps (step1, step2, step3)
-        File? library_generation_settings  # Settings for combining archives into library
-        File? directDIA_settings  # Settings for directDIA single VM mode
-        File? DIA_analysis_settings  # Settings for DIA analysis and SNE combine
+        File? search_settings_pulsar  # Settings for Pulsar steps (step1, step2, step3)
+        File? search_settings_library_generation  # Settings for combining archives into library
+        File? search_settings_directDIA  # Settings for directDIA single VM mode
+        File? search_settings_DIA_analysis  # Settings for DIA analysis and SNE combine
         File? json_settings  # JSON settings for Spectronaut
         File? condition_setup  # Experimental condition setup
 
@@ -46,11 +46,17 @@ workflow parallel_spectronaut {
         File? report_schema_2  # Report schema 2
         File? report_schema_3  # Report schema 3
         File? report_schema_4  # Report schema 4
+        File? convert_schema  # Optional schema for HTRMS conversion
 
         # ============================================================================
         # Workflow Configuration
         # ============================================================================
         String experiment_type = "proteome"  # Experiment type: "proteome" or "ptm" (affects resource presets)
+
+        # ============================================================================
+        # HTRMS Conversion Configuration
+        # ============================================================================
+        Boolean do_conversion = true  # Enable HTRMS file conversion (default: true)
         Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
         # ============================================================================
@@ -66,6 +72,7 @@ workflow parallel_spectronaut {
         Int n_preemptible_combine_archives = 0  # Archive combining preemptible attempts
         Int n_preemptible_dia_analysis = 0  # DIA analysis preemptible attempts
         Int n_preemptible_combine_sne = 0  # SNE combining preemptible attempts
+        Int n_preemptible_htrms_conversion = 2  # Preemptible attempts for conversion
     }
 
     # Compute preset configurations based on experiment_type
@@ -197,6 +204,37 @@ workflow parallel_spectronaut {
     Int calculated_num_vms = create_bins.calculated_num_vms
 
     # ============================================================================
+    # OPTIONAL: HTRMS Conversion (one file per VM for maximum speed)
+    # ============================================================================
+    # Flatten all bins to get individual files for conversion
+    Array[File] all_input_files = flatten(file_bins)
+
+    if (do_conversion) {
+        # Scatter over each individual file (one file per VM)
+        scatter (input_file in all_input_files) {
+            call htrms_conversion { input:
+                input_file = input_file,
+                convert_schema = convert_schema,
+                n_preemptible = n_preemptible_htrms_conversion,
+            }
+        }
+    }
+
+    # Select converted files or original files
+    Array[File] files_for_search = select_first([
+        htrms_conversion.htrms_file,
+        all_input_files,
+    ])
+
+    # Re-bin the files (converted or original) for downstream parallel tasks
+    call create_search_bins { input:
+        files = files_for_search,
+        num_bins = calculated_num_vms,
+    }
+
+    Array[Array[File]] search_file_bins = read_json(create_search_bins.bins_json)
+
+    # ============================================================================
     # PHASE III: Conditional Execution - Single VM vs Parallel
     # ============================================================================
 
@@ -205,10 +243,10 @@ workflow parallel_spectronaut {
         # Run classic directDIA on all files in one VM
         call directDIA_single_vm { input:
             experiment_name = experiment_name,
-            input_files = flatten(file_bins),
+            input_files = files_for_search,
             total_size_gb = total_input_size_gb,
             disk_size_multiplier = disk_size_multiplier,
-            analysis_schema = directDIA_settings,
+            analysis_schema = search_settings_directDIA,
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
             fasta_3 = fasta_3,
@@ -235,10 +273,10 @@ workflow parallel_spectronaut {
         # ========================================================================
         # STEP 1.1: Generate intermediate search archives per bin (scatter)
         # ========================================================================
-        scatter (i in range(length(file_bins))) {
+        scatter (i in range(length(search_file_bins))) {
             call pulsar_step1_binned { input:
-                input_files = file_bins[i],
-                analysis_schema = Pulsar_search_settings,
+                input_files = search_file_bins[i],
+                analysis_schema = search_settings_pulsar,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
@@ -267,7 +305,7 @@ workflow parallel_spectronaut {
             cpu = pulsar_step2_cpu,
             ram_gb = pulsar_step2_ram_gb,
             enzyme_database = enzyme_database,
-            analysis_schema = Pulsar_search_settings,
+            analysis_schema = search_settings_pulsar,
             n_preemptible = n_preemptible_pulsar_step2,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
@@ -275,13 +313,13 @@ workflow parallel_spectronaut {
         # ========================================================================
         # STEP 1.3: Generate final search archives per bin with optimized models
         # ========================================================================
-        scatter (i in range(length(file_bins))) {
+        scatter (i in range(length(search_file_bins))) {
             call pulsar_step3_binned { input:
-                input_files = file_bins[i],
+                input_files = search_file_bins[i],
                 intermediate_archive = pulsar_step1_binned.intermediate_archive[i],
                 optimized_models = pulsar_step2_combine_models.optimized_models,
                 experiment_name = experiment_name,
-                analysis_schema = Pulsar_search_settings,
+                analysis_schema = search_settings_pulsar,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
@@ -309,7 +347,7 @@ workflow parallel_spectronaut {
             cpu = combine_archives_cpu,
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
-            analysis_schema = library_generation_settings,
+            analysis_schema = search_settings_library_generation,
             n_preemptible = n_preemptible_combine_archives,
             allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
         }
@@ -317,16 +355,17 @@ workflow parallel_spectronaut {
         # ========================================================================
         # STEP 2: DIA analysis per bin against merged library
         # ========================================================================
-        scatter (i in range(length(file_bins))) {
+        scatter (i in range(length(search_file_bins))) {
             call dia_analysis_binned { input:
                 experiment_name = experiment_name,
-                input_files = file_bins[i],
+                input_files = search_file_bins[i],
                 search_archive = combine_final_archives.merged_archive,
-                analysis_schema = DIA_analysis_settings,
+                analysis_schema = search_settings_DIA_analysis,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
                 json_settings = json_settings,
+                enzyme_database = enzyme_database,
                 cpu = dia_analysis_cpu,
                 ram_gb = dia_analysis_ram_gb,
                 bin_index = i,
@@ -346,7 +385,7 @@ workflow parallel_spectronaut {
         call combine_sne { input:
             experiment_name = experiment_name,
             sne_files = all_sne,
-            analysis_schema = DIA_analysis_settings,
+            analysis_schema = search_settings_DIA_analysis,
             condition_setup = condition_setup,
             report_schema_1 = report_schema_1,
             report_schema_2 = report_schema_2,
@@ -544,6 +583,124 @@ task calculate_directory_size_gcs {
     }
 }
 
+task htrms_conversion {
+    input {
+        File input_file
+        Int n_preemptible
+        File? convert_schema
+    }
+
+    # Calculate disk size based on input file
+    Int disk_size = ceil(size(input_file, "GB") * 5) + 50
+
+    command <<<
+        set -euo pipefail
+
+        cromwell_root=$(pwd)
+
+        input_dir="${cromwell_root}/work_input"
+        mkdir -p "${input_dir}"
+
+        output_dir="${cromwell_root}/out_conversion"
+        mkdir -p "${output_dir}"
+
+        tmp_dir="${cromwell_root}/sn_temp"
+        mkdir -p "${tmp_dir}"
+
+        # Copy input file (supports both files and directories like .d folders)
+        if [ -d "~{input_file}" ]; then
+            cp -r "~{input_file}" "${input_dir}/"
+        else
+            cp "~{input_file}" "${input_dir}/"
+        fi
+
+        # Run HTRMS conversion
+        echo "Running HTRMS conversion..."
+        spectronaut -convert \
+            -i "${input_dir}" \
+            -o "${output_dir}" \
+            ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
+            -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
+
+        # Find and move the converted file
+        htrms_file=$(find "${output_dir}" -type f -name "*.htrms" -print -quit)
+
+        if [ -z "${htrms_file}" ]; then
+            echo "ERROR: No .htrms file produced" >&2
+            exit 1
+        fi
+
+        # Extract basename and rename
+        input_basename=$(basename "~{input_file}")
+        output_filename="${input_basename%.*}.htrms"
+
+        mv "${htrms_file}" "${cromwell_root}/${output_filename}"
+        echo "Converted to: ${output_filename}"
+    >>>
+
+    output {
+        File htrms_file = glob("*.htrms")[0]
+    }
+
+    runtime {
+        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        cpu: 16
+        memory: "32GB"
+        bootDiskSizeGb: 50
+        disks: "local-disk ~{disk_size} HDD"
+        preemptible: n_preemptible
+        cpuPlatform: "AMD Rome"
+    }
+}
+
+task create_search_bins {
+    input {
+        Array[File] files
+        Int num_bins
+    }
+
+    command <<<
+                python3 <<CODE
+        import json
+
+        with open("~{write_lines(files)}") as f:
+            files = [line.strip() for line in f if line.strip()]
+
+        num_bins = ~{num_bins}
+
+        # Same round-robin distribution as create_bins
+        actual_bins = min(num_bins, len(files))
+        if actual_bins < 1:
+            actual_bins = 1
+
+        bins = [[] for _ in range(actual_bins)]
+        for i, file_path in enumerate(files):
+            bin_index = i % actual_bins
+            bins[bin_index].append(file_path)
+
+        with open("bins.json", "w") as f:
+            json.dump(bins, f, indent=2)
+
+        print(f"Created {actual_bins} bins from {len(files)} files")
+        for i, bin_files in enumerate(bins):
+            print(f"Bin {i}: {len(bin_files)} files")
+        CODE
+    >>>
+
+    output {
+        File bins_json = "bins.json"
+    }
+
+    runtime {
+        docker: "python:3.9-slim"
+        cpu: 2
+        memory: "8GB"
+        bootDiskSizeGb: 20
+        disks: "local-disk 50 HDD"
+        cpuPlatform: "AMD Rome"
+    }
+}
+
 task directDIA_single_vm {
     input {
         File fasta_1
@@ -682,7 +839,7 @@ task directDIA_single_vm {
                 'BEGIN { printf "%.2f", total / cpus }')
 
             echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -736,7 +893,7 @@ task directDIA_single_vm {
                 disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
                     'BEGIN { printf "%.2f", (used / alloc) * 100 }')
 
-                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Final Disk Used: ${disk_used_gb} GB"
                 echo "Disk Usage: ${disk_usage_percent}%"
             else
                 echo "Could not measure disk usage"
@@ -891,7 +1048,7 @@ task pulsar_step1_binned {
                 'BEGIN { printf "%.2f", total / cpus }')
 
             echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -945,7 +1102,7 @@ task pulsar_step1_binned {
                 disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
                     'BEGIN { printf "%.2f", (used / alloc) * 100 }')
 
-                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Final Disk Used: ${disk_used_gb} GB"
                 echo "Disk Usage: ${disk_usage_percent}%"
             else
                 echo "Could not measure disk usage"
@@ -1089,7 +1246,7 @@ task pulsar_step2_combine_models {
                 'BEGIN { printf "%.2f", total / cpus }')
 
             echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1143,7 +1300,7 @@ task pulsar_step2_combine_models {
                 disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
                     'BEGIN { printf "%.2f", (used / alloc) * 100 }')
 
-                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Final Disk Used: ${disk_used_gb} GB"
                 echo "Disk Usage: ${disk_usage_percent}%"
             else
                 echo "Could not measure disk usage"
@@ -1298,7 +1455,7 @@ task pulsar_step3_binned {
                 'BEGIN { printf "%.2f", total / cpus }')
 
             echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1352,7 +1509,7 @@ task pulsar_step3_binned {
                 disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
                     'BEGIN { printf "%.2f", (used / alloc) * 100 }')
 
-                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Final Disk Used: ${disk_used_gb} GB"
                 echo "Disk Usage: ${disk_usage_percent}%"
             else
                 echo "Could not measure disk usage"
@@ -1478,7 +1635,7 @@ task combine_final_archives {
                 'BEGIN { printf "%.2f", total / cpus }')
 
             echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1532,7 +1689,7 @@ task combine_final_archives {
                 disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
                     'BEGIN { printf "%.2f", (used / alloc) * 100 }')
 
-                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Final Disk Used: ${disk_used_gb} GB"
                 echo "Disk Usage: ${disk_usage_percent}%"
             else
                 echo "Could not measure disk usage"
@@ -1691,7 +1848,7 @@ task dia_analysis_binned {
                 'BEGIN { printf "%.2f", total / cpus }')
 
             echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1745,7 +1902,7 @@ task dia_analysis_binned {
                 disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
                     'BEGIN { printf "%.2f", (used / alloc) * 100 }')
 
-                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Final Disk Used: ${disk_used_gb} GB"
                 echo "Disk Usage: ${disk_usage_percent}%"
             else
                 echo "Could not measure disk usage"
@@ -1887,7 +2044,7 @@ task combine_sne {
                 'BEGIN { printf "%.2f", total / cpus }')
 
             echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Total CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+            echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1941,7 +2098,7 @@ task combine_sne {
                 disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
                     'BEGIN { printf "%.2f", (used / alloc) * 100 }')
 
-                echo "Actual Max Disk Used: ${disk_used_gb} GB"
+                echo "Final Disk Used: ${disk_used_gb} GB"
                 echo "Disk Usage: ${disk_usage_percent}%"
             else
                 echo "Could not measure disk usage"
