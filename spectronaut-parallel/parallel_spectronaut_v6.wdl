@@ -228,7 +228,7 @@ workflow parallel_spectronaut {
 
     # Re-bin the files (converted or original) for downstream parallel tasks
     call create_search_bins { input:
-        files = files_for_search,
+        file_paths = files_for_search,
         num_bins = calculated_num_vms,
     }
 
