@@ -62,7 +62,6 @@ workflow parallel_spectronaut {
         # ============================================================================
         # Resource Configuration
         # ============================================================================
-        Int disk_size_multiplier = 3  # Multiplier for dynamic disk size calculation
 
         # Preemptible instance settings (0 = non-preemptible, >0 = number of preemptible attempts)
         Int n_preemptible_pulsar_step1 = 0  # Pulsar step 1 preemptible attempts
@@ -89,11 +88,11 @@ workflow parallel_spectronaut {
     # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
     Map[String, Int] pulsar_step2_cpu_presets = {
         "proteome": 24,
-        "ptm": 32,
+        "ptm": 48,
     }
     Map[String, Int] pulsar_step2_ram_gb_presets = {
         "proteome": 64,
-        "ptm": 96,
+        "ptm": 128,
     }
 
     # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
@@ -260,8 +259,7 @@ workflow parallel_spectronaut {
         call directDIA_single_vm { input:
             experiment_name = experiment_name,
             input_files = files_for_search,
-            total_size_gb = finalized_total_size_gb,
-            disk_size_multiplier = disk_size_multiplier,
+
             analysis_schema = search_settings_00_directDIA,
             fasta_1 = fasta_1,
             fasta_2 = fasta_2,
@@ -276,7 +274,7 @@ workflow parallel_spectronaut {
             cpu = directDIA_single_vm_cpu,
             ram_gb = directDIA_single_vm_ram_gb,
             n_preemptible = n_preemptible_directDIA_single_vm,
-            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
+            allocated_disk_gb = ceil(finalized_total_size_gb * 4),
         }
     }
 
@@ -301,9 +299,8 @@ workflow parallel_spectronaut {
                 ram_gb = pulsar_step1_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step1,
-                bin_size_gb = bin_size_per_vm,
-                disk_size_multiplier = disk_size_multiplier,
-                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
+
+                allocated_disk_gb = ceil(bin_size_per_vm * 3),
             }
         }
 
@@ -316,14 +313,13 @@ workflow parallel_spectronaut {
         call pulsar_step2_combine_models { input:
             intermediate_archives = intermediate_archives,
             experiment_name = experiment_name,
-            total_input_size_gb = finalized_total_size_gb,
-            disk_size_multiplier = disk_size_multiplier,
+
             cpu = pulsar_step2_cpu,
             ram_gb = pulsar_step2_ram_gb,
             enzyme_database = enzyme_database,
             analysis_schema = search_settings_01_Pulsar_search,
             n_preemptible = n_preemptible_pulsar_step2,
-            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
+            allocated_disk_gb = ceil(size(intermediate_archives, "GB") * 5),
         }
 
         # ========================================================================
@@ -336,21 +332,16 @@ workflow parallel_spectronaut {
                 optimized_models = pulsar_step2_combine_models.optimized_models,
                 experiment_name = experiment_name,
                 analysis_schema = search_settings_01_Pulsar_search,
-                fasta_1 = fasta_1,
-                fasta_2 = fasta_2,
-                fasta_3 = fasta_3,
                 enzyme_database = enzyme_database,
                 cpu = pulsar_step3_cpu,
                 ram_gb = pulsar_step3_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step3,
-                bin_size_gb = bin_size_per_vm,
-                disk_size_multiplier = disk_size_multiplier,
-                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
+
+                allocated_disk_gb = ceil(bin_size_per_vm * 3),
             }
         }
 
-        # Collect all final archives (one per bin)
         # Collect all final archives (one per bin)
         Array[File] final_archives = pulsar_step3_binned.final_archive
 
@@ -359,14 +350,13 @@ workflow parallel_spectronaut {
         # ========================================================================
         call combine_final_archives { input:
             input_archives = final_archives,
-            total_input_size_gb = finalized_total_size_gb,
-            disk_size_multiplier = disk_size_multiplier,
+
             cpu = combine_archives_cpu,
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
             analysis_schema = search_settings_02_library_generation,
             n_preemptible = n_preemptible_combine_archives,
-            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
+            allocated_disk_gb = ceil(size(final_archives, "GB") * 5),
         }
 
         # ========================================================================
@@ -386,10 +376,9 @@ workflow parallel_spectronaut {
                 cpu = dia_analysis_cpu,
                 ram_gb = dia_analysis_ram_gb,
                 bin_index = i,
-                bin_size_gb = bin_size_per_vm,
-                disk_size_multiplier = disk_size_multiplier,
+
                 n_preemptible = n_preemptible_dia_analysis,
-                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
+                allocated_disk_gb = ceil(bin_size_per_vm * 3),
             }
         }
 
@@ -409,11 +398,10 @@ workflow parallel_spectronaut {
             report_schema_4 = report_schema_4,
             cpu = combine_sne_cpu,
             ram_gb = combine_sne_ram_gb,
-            total_input_size_gb = finalized_total_size_gb,
-            disk_size_multiplier = disk_size_multiplier,
+
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
-            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
+            allocated_disk_gb = ceil(size(all_sne, "GB") * 4),
         }
     }
 
@@ -516,12 +504,6 @@ task create_bins {
         # Ensure at least 1 bin if files exist
         if actual_bins < 1 and len(files) > 0:
             actual_bins = 1
-
-        # Efficiency check: Force parallelization if user requested 1 VM for > 36 files
-        if num_bins == 1 and len(files) > 36:
-            print(f"WARNING: Requested 1 VM for {len(files)} files (> 36)")
-            print(f"Setting actual_bins to 10 for efficient parallel analysis")
-            actual_bins = 10
 
         # Create bins using round-robin distribution
         bins = [[] for _ in range(actual_bins)]
@@ -668,8 +650,6 @@ task directDIA_single_vm {
         File fasta_1
         Array[File] input_files
         String experiment_name
-        Float total_size_gb
-        Int disk_size_multiplier
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
@@ -877,7 +857,7 @@ task directDIA_single_vm {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
-        disks: "local-disk ~{ceil(total_size_gb * disk_size_multiplier)} HDD"
+        disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
     }
@@ -887,8 +867,6 @@ task pulsar_step1_binned {
     input {
         File fasta_1
         Array[File] input_files
-        Float bin_size_gb
-        Int disk_size_multiplier
         Int cpu
         Int ram_gb
         Int bin_index
@@ -1119,8 +1097,6 @@ task pulsar_step2_combine_models {
     input {
         Array[File] intermediate_archives
         String experiment_name
-        Float total_input_size_gb
-        Int disk_size_multiplier
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
@@ -1313,21 +1289,16 @@ task pulsar_step2_combine_models {
 
 task pulsar_step3_binned {
     input {
-        File fasta_1
         File intermediate_archive
         File optimized_models
         Array[File] input_files
         String experiment_name
-        Float bin_size_gb
-        Int disk_size_multiplier
         Int cpu
         Int ram_gb
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
         File? analysis_schema
-        File? fasta_2
-        File? fasta_3
         File? enzyme_database
     }
 
@@ -1544,8 +1515,6 @@ task pulsar_step3_binned {
 task combine_final_archives {
     input {
         Array[File] input_archives
-        Float total_input_size_gb
-        Int disk_size_multiplier
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
@@ -1576,7 +1545,8 @@ task combine_final_archives {
         merged_library="merged_library.kit"
 
         work_archives="${cromwell_root}/work_archives"
-        mkdir -p "${work_archives}"
+        tmp_dir="${cromwell_root}/sn_temp"
+        mkdir -p "${work_archives}" "${tmp_dir}"
 
         echo "Copying archives for merging..."
         while IFS= read -r archive; do
@@ -1596,6 +1566,7 @@ task combine_final_archives {
             -k "${cromwell_root}/${merged_library}" \
             -o "${cromwell_root}" \
             ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            -setTemp "${tmp_dir}" \
             2>&1 | tee merge_archives.log
 
         if [ ! -f "${cromwell_root}/${merged_library}" ]; then
@@ -1715,7 +1686,7 @@ task combine_final_archives {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
-        disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
+        disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
     }
@@ -1727,8 +1698,6 @@ task dia_analysis_binned {
         File fasta_1
         Array[File] input_files
         String experiment_name
-        Float bin_size_gb
-        Int disk_size_multiplier
         Int cpu
         Int ram_gb
         Int bin_index
@@ -1928,7 +1897,7 @@ task dia_analysis_binned {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
-        disks: "local-disk ~{ceil(bin_size_gb * disk_size_multiplier)} HDD"
+        disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
     }
@@ -1938,8 +1907,6 @@ task combine_sne {
     input {
         Array[File] sne_files
         String experiment_name
-        Float total_input_size_gb
-        Int disk_size_multiplier
         Int ram_gb
         Int cpu
         Int allocated_disk_gb
@@ -2124,7 +2091,7 @@ task combine_sne {
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
-        disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
+        disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
     }
