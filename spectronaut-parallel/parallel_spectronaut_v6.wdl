@@ -64,12 +64,12 @@ workflow parallel_spectronaut {
         # ============================================================================
 
         # Preemptible instance settings (0 = non-preemptible, >0 = number of preemptible attempts)
-        Int n_preemptible_pulsar_step1 = 0  # Pulsar step 1 preemptible attempts
+        Int n_preemptible_pulsar_step1 = 1  # Pulsar step 1 preemptible attempts
         Int n_preemptible_pulsar_step2 = 0  # Pulsar step 2 preemptible attempts
-        Int n_preemptible_pulsar_step3 = 0  # Pulsar step 3 preemptible attempts
+        Int n_preemptible_pulsar_step3 = 1  # Pulsar step 3 preemptible attempts
         Int n_preemptible_directDIA_single_vm = 0  # DirectDIA single VM preemptible attempts
         Int n_preemptible_combine_archives = 0  # Archive combining preemptible attempts
-        Int n_preemptible_dia_analysis = 0  # DIA analysis preemptible attempts
+        Int n_preemptible_dia_analysis = 1  # DIA analysis preemptible attempts
         Int n_preemptible_combine_sne = 0  # SNE combining preemptible attempts
         Int n_preemptible_htrms_conversion = 2  # Preemptible attempts for conversion
     }
