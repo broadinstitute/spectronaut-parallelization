@@ -249,10 +249,6 @@ workflow parallel_spectronaut {
         create_bins.bins_json,
     ])) else []
 
-    # ============================================================================
-    # PHASE III: Conditional Execution - Single VM vs Parallel
-    # ============================================================================
-
     # BRANCH A: Single VM Mode (num_vms == 1)
     if (calculated_num_vms == 1) {
         # Run classic directDIA on all files in one VM
@@ -282,7 +278,7 @@ workflow parallel_spectronaut {
     if (calculated_num_vms > 1) {
 
         # Calculate approximate size per VM for disk allocation
-        Float bin_size_per_vm = finalized_total_size_gb / calculated_num_vms + 25
+        Float bin_size_per_vm = finalized_total_size_gb / calculated_num_vms + 20
 
         # ========================================================================
         # STEP 1.1: Generate intermediate search archives per bin (scatter)
@@ -299,7 +295,6 @@ workflow parallel_spectronaut {
                 ram_gb = pulsar_step1_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step1,
-
                 allocated_disk_gb = ceil(bin_size_per_vm * 3),
             }
         }
@@ -368,10 +363,6 @@ workflow parallel_spectronaut {
                 input_files = search_file_bins[i],
                 search_archive = combine_final_archives.merged_archive,
                 analysis_schema = search_settings_03_DIA_analysis,
-                fasta_1 = fasta_1,
-                fasta_2 = fasta_2,
-                fasta_3 = fasta_3,
-                json_settings = json_settings,
                 enzyme_database = enzyme_database,
                 cpu = dia_analysis_cpu,
                 ram_gb = dia_analysis_ram_gb,
@@ -529,7 +520,6 @@ task create_bins {
 
     output {
         File bins_json = "bins.json"
-        Int calculated_num_vms = read_int("calculated_num_vms.txt")
         File calculated_num_vms_file = "calculated_num_vms.txt"
     }
 
@@ -947,7 +937,7 @@ task pulsar_step1_binned {
         # Prepare command string for printing (back-tracing)
         cmd_string="spectronaut lg -se Pulsar ${cmd_flags} -fasta ~{fasta_1} ~{if defined(
              fasta_2) then "-fasta " + fasta_2 else ""} ~{if defined(fasta_3) then "-fasta "
-             + fasta_3 else ""} ~{if defined(analysis_schema) then "-s " + analysis_schema
+             + fasta_3 else ""} ~{if defined(analysis_schema) then "-rs " + analysis_schema
              else ""} --pulsarStage pulsarStep1 -a ${output_dir}/search_archive_step1_bin_~{
              bin_index}.psar -o ${output_dir} -setTemp ${tmp_dir}"
 
@@ -959,7 +949,7 @@ task pulsar_step1_binned {
             -fasta "~{fasta_1}" \
             ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
             ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            ~{if defined(analysis_schema) then "-rs " + analysis_schema else ""} \
             --pulsarStage pulsarStep1 \
             -a "${output_dir}/search_archive_step1_bin_~{bin_index}.psar" \
             -o "${output_dir}" \
@@ -1154,7 +1144,7 @@ task pulsar_step2_combine_models {
             -sad "${archives_dir}" \
             --pulsarStage pulsarStep2 \
             -n "~{experiment_name}" \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            ~{if defined(analysis_schema) then "-rs " + analysis_schema else ""} \
             --noOutputSubfolder \
             -o "${output_dir}" \
             -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step2_combine.log
@@ -1367,7 +1357,7 @@ task pulsar_step3_binned {
         # Prepare command string for printing (back-tracing)
         cmd_string="spectronaut lg -se Pulsar ${cmd_flags} -sa ~{intermediate_archive} -a ${output_dir}/search_archive_bin_~{
              bin_index}.psar --optimizedModels ~{optimized_models} --pulsarStage pulsarStep3 -o ${output_dir} -n ~{
-             experiment_name}_bin_~{bin_index} ~{if defined(analysis_schema) then "-s " + analysis_schema
+             experiment_name}_bin_~{bin_index} ~{if defined(analysis_schema) then "-rs " + analysis_schema
              else ""} -setTemp ${tmp_dir}"
 
         echo "Command being run:"
@@ -1381,7 +1371,7 @@ task pulsar_step3_binned {
             --pulsarStage pulsarStep3 \
             -o "${output_dir}" \
             -n "~{experiment_name}_bin_~{bin_index}" \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            ~{if defined(analysis_schema) then "-rs " + analysis_schema else ""} \
             -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step3_bin_~{bin_index}.log
 
         # Verify output and move to cromwell root
@@ -1695,7 +1685,6 @@ task combine_final_archives {
 task dia_analysis_binned {
     input {
         File search_archive
-        File fasta_1
         Array[File] input_files
         String experiment_name
         Int cpu
@@ -1705,9 +1694,6 @@ task dia_analysis_binned {
         Int n_preemptible
         File? enzyme_database
         File? analysis_schema
-        File? fasta_2
-        File? fasta_3
-        File? json_settings
     }
 
     command <<<
@@ -1764,10 +1750,6 @@ task dia_analysis_binned {
         echo "Running DIA analysis for bin ~{bin_index} (batch processing ${file_count} files)..."
         spectronaut diaanalysis \
             ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
-            -fasta "~{fasta_1}" \
-            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
-            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
-            ~{if defined(json_settings) then "-j " + json_settings else ""} \
             -n "~{experiment_name}_bin_~{bin_index}" \
             -o "${output_dir}" \
             -d "${input_dir}" \
