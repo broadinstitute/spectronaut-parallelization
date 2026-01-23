@@ -88,8 +88,8 @@ workflow parallel_spectronaut {
 
     # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
     Map[String, Int] pulsar_step2_cpu_presets = {
-        "proteome": 16,
-        "ptm": 24,
+        "proteome": 24,
+        "ptm": 32,
     }
     Map[String, Int] pulsar_step2_ram_gb_presets = {
         "proteome": 64,
@@ -108,8 +108,8 @@ workflow parallel_spectronaut {
 
     # Combine final archives into .kit library
     Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 16,
-        "ptm": 24,
+        "proteome": 24,
+        "ptm": 32,
     }
     Map[String, Int] combine_archives_ram_gb_presets = {
         "proteome": 64,
@@ -128,8 +128,8 @@ workflow parallel_spectronaut {
 
     # DIA analysis per bin (after library is created)
     Map[String, Int] dia_analysis_cpu_presets = {
-        "proteome": 16,
-        "ptm": 24,
+        "proteome": 24,
+        "ptm": 32,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
         "proteome": 64,
@@ -191,23 +191,10 @@ workflow parallel_spectronaut {
     Float total_input_size_gb = calculate_directory_size_gcs.total_size_gb
 
     # ============================================================================
-    # PHASE II: Intelligent Binning
-    # ============================================================================
-
-    # Bin input files with sorting and validation
-    call create_bins { input:
-        file_paths = read_lines(list_files.file_list),
-        num_bins = num_vms,
-    }
-
-    Array[Array[File]] file_bins = read_json(create_bins.bins_json)
-    Int calculated_num_vms = create_bins.calculated_num_vms
-
-    # ============================================================================
-    # OPTIONAL: HTRMS Conversion (one file per VM for maximum speed)
+    # PHASE II: HTRMS Conversion
     # ============================================================================
     # Flatten all bins to get individual files for conversion
-    Array[File] all_input_files = flatten(file_bins)
+    Array[File] all_input_files = read_lines(list_files.file_list)
 
     if (do_conversion) {
         # Scatter over each individual file (one file per VM)
@@ -218,22 +205,50 @@ workflow parallel_spectronaut {
                 n_preemptible = n_preemptible_htrms_conversion,
             }
         }
+
+        call sum_floats { input:
+            sizes = htrms_conversion.htrms_size_gb,
+        }
     }
 
     # Select converted files or original files
-    # htrms_conversion.htrms_file is Array[Array[File]]? due to conditional block
-    # Use select_first to handle the optional, then flatten
-    Array[File] files_for_search = if defined(htrms_conversion.htrms_file)
-        then flatten(select_first([htrms_conversion.htrms_file]))
-        else all_input_files
+    # htrms_conversion.htrms_file is Array[File]? result of scatter
+    # Use select_first to handle the optional
+    Array[File] files_for_search = select_first([
+        htrms_conversion.htrms_file,
+        all_input_files,
+    ])
 
-    # Re-bin the files (converted or original) for downstream parallel tasks
-    call create_search_bins { input:
-        file_paths = files_for_search,
-        num_bins = calculated_num_vms,
+    Float finalized_total_size_gb = if do_conversion then select_first([
+        sum_floats.total_size,
+    ]) else total_input_size_gb
+
+    # ============================================================================
+    # PHASE III: Conditional Execution - Single VM vs Parallel
+    # ============================================================================
+
+    # Determine if we need parallelization
+    # If num_vms > 1, we proceed with binning. If num_vms == 1, we skip binning.
+
+    # Logic:
+    # If num_vms == 1: No binning. calculated_num_vms = 1.
+    # If num_vms > 1: Run create_search_bins. calculated_num_vms comes from there.
+
+    if (num_vms > 1) {
+        # Re-bin the files for downstream parallel tasks
+        call create_bins { input:
+            file_paths = files_for_search,
+            num_bins = num_vms,
+        }
     }
 
-    Array[Array[File]] search_file_bins = read_json(create_search_bins.bins_json)
+    Int calculated_num_vms = if (num_vms > 1) then read_int(select_first([
+        create_bins.calculated_num_vms_file,
+    ])) else 1
+
+    Array[Array[File]] search_file_bins = if (num_vms > 1) then read_json(select_first([
+        create_bins.bins_json,
+    ])) else []
 
     # ============================================================================
     # PHASE III: Conditional Execution - Single VM vs Parallel
@@ -245,7 +260,7 @@ workflow parallel_spectronaut {
         call directDIA_single_vm { input:
             experiment_name = experiment_name,
             input_files = files_for_search,
-            total_size_gb = total_input_size_gb,
+            total_size_gb = finalized_total_size_gb,
             disk_size_multiplier = disk_size_multiplier,
             analysis_schema = search_settings_00_directDIA,
             fasta_1 = fasta_1,
@@ -261,7 +276,7 @@ workflow parallel_spectronaut {
             cpu = directDIA_single_vm_cpu,
             ram_gb = directDIA_single_vm_ram_gb,
             n_preemptible = n_preemptible_directDIA_single_vm,
-            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
+            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
         }
     }
 
@@ -269,7 +284,7 @@ workflow parallel_spectronaut {
     if (calculated_num_vms > 1) {
 
         # Calculate approximate size per VM for disk allocation
-        Float bin_size_per_vm = total_input_size_gb / calculated_num_vms + 25
+        Float bin_size_per_vm = finalized_total_size_gb / calculated_num_vms + 25
 
         # ========================================================================
         # STEP 1.1: Generate intermediate search archives per bin (scatter)
@@ -293,7 +308,7 @@ workflow parallel_spectronaut {
         }
 
         # Collect all intermediate archives (one per bin)
-        Array[File] intermediate_archives = flatten(pulsar_step1_binned.intermediate_archive)
+        Array[File] intermediate_archives = pulsar_step1_binned.intermediate_archive
 
         # ========================================================================
         # STEP 1.2: Combine intermediate archives to generate optimized models
@@ -301,7 +316,7 @@ workflow parallel_spectronaut {
         call pulsar_step2_combine_models { input:
             intermediate_archives = intermediate_archives,
             experiment_name = experiment_name,
-            total_input_size_gb = total_input_size_gb,
+            total_input_size_gb = finalized_total_size_gb,
             disk_size_multiplier = disk_size_multiplier,
             cpu = pulsar_step2_cpu,
             ram_gb = pulsar_step2_ram_gb,
@@ -317,8 +332,8 @@ workflow parallel_spectronaut {
         scatter (i in range(length(search_file_bins))) {
             call pulsar_step3_binned { input:
                 input_files = search_file_bins[i],
-                intermediate_archive = pulsar_step1_binned.intermediate_archive[i][0],
-                optimized_models = pulsar_step2_combine_models.optimized_models[0],
+                intermediate_archive = pulsar_step1_binned.intermediate_archive[i],
+                optimized_models = pulsar_step2_combine_models.optimized_models,
                 experiment_name = experiment_name,
                 analysis_schema = search_settings_01_Pulsar_search,
                 fasta_1 = fasta_1,
@@ -336,21 +351,22 @@ workflow parallel_spectronaut {
         }
 
         # Collect all final archives (one per bin)
-        Array[File] final_archives = flatten(pulsar_step3_binned.final_archive)
+        # Collect all final archives (one per bin)
+        Array[File] final_archives = pulsar_step3_binned.final_archive
 
         # ========================================================================
         # STEP 1.4: Merge final search archives into single .kit library
         # ========================================================================
         call combine_final_archives { input:
             input_archives = final_archives,
-            total_input_size_gb = total_input_size_gb,
+            total_input_size_gb = finalized_total_size_gb,
             disk_size_multiplier = disk_size_multiplier,
             cpu = combine_archives_cpu,
             ram_gb = combine_archives_ram_gb,
             enzyme_database = enzyme_database,
             analysis_schema = search_settings_02_library_generation,
             n_preemptible = n_preemptible_combine_archives,
-            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
+            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
         }
 
         # ========================================================================
@@ -377,8 +393,7 @@ workflow parallel_spectronaut {
             }
         }
 
-        Array[Array[File]] all_sne_nested = dia_analysis_binned.sne_files
-        Array[File] all_sne = flatten(all_sne_nested)
+        Array[File] all_sne = dia_analysis_binned.sne_files
 
         # ========================================================================
         # STEP 3: Combine scattered SNE files and generate reports
@@ -394,11 +409,11 @@ workflow parallel_spectronaut {
             report_schema_4 = report_schema_4,
             cpu = combine_sne_cpu,
             ram_gb = combine_sne_ram_gb,
-            total_input_size_gb = total_input_size_gb,
+            total_input_size_gb = finalized_total_size_gb,
             disk_size_multiplier = disk_size_multiplier,
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
-            allocated_disk_gb = ceil(total_input_size_gb * disk_size_multiplier),
+            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
         }
     }
 
@@ -456,7 +471,7 @@ task create_bins {
     }
 
     command <<<
-                python3 <<CODE
+        python3 <<CODE
         import json
         import os
 
@@ -477,7 +492,8 @@ task create_bins {
 
         # Validate num_bins
         if num_bins < 1:
-            raise ValueError(f"num_bins must be at least 1, got {num_bins}")
+            print(f"WARNING: num_bins must be at least 1, got {num_bins}. Setting to 1.")
+            num_bins = 1
 
         # Files pre-sorted by list_files task (line 290: sort -u)
         # Order preserved through scatter-gather (lines 103-113)
@@ -496,6 +512,10 @@ task create_bins {
             print(f"WARNING: Calculated {actual_bins} bins, which exceeds maximum of 100")
             print(f"Reducing actual_bins to 50 for resource optimization")
             actual_bins = 50
+
+        # Ensure at least 1 bin if files exist
+        if actual_bins < 1 and len(files) > 0:
+            actual_bins = 1
 
         # Efficiency check: Force parallelization if user requested 1 VM for > 36 files
         if num_bins == 1 and len(files) > 36:
@@ -528,6 +548,7 @@ task create_bins {
     output {
         File bins_json = "bins.json"
         Int calculated_num_vms = read_int("calculated_num_vms.txt")
+        File calculated_num_vms_file = "calculated_num_vms.txt"
     }
 
     runtime {
@@ -627,65 +648,18 @@ task htrms_conversion {
     >>>
 
     output {
-        Array[File] htrms_file = glob("*.htrms")
+        File htrms_file = glob("*.htrms")[0]
+        Float htrms_size_gb = size(htrms_file, "GB")
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 32
         disks: "local-disk 300 HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
-    }
-}
-
-task create_search_bins {
-    input {
-        Array[String] file_paths
-        Int num_bins
-    }
-
-    command <<<
-                python3 <<CODE
-        import json
-
-        with open("~{write_lines(file_paths)}") as f:
-            files = [line.strip() for line in f if line.strip()]
-
-        num_bins = ~{num_bins}
-
-        # Same round-robin distribution as create_bins
-        actual_bins = min(num_bins, len(files))
-        if actual_bins < 1:
-            actual_bins = 1
-
-        bins = [[] for _ in range(actual_bins)]
-        for i, file_path in enumerate(files):
-            bin_index = i % actual_bins
-            bins[bin_index].append(file_path)
-
-        with open("bins.json", "w") as f:
-            json.dump(bins, f, indent=2)
-
-        print(f"Created {actual_bins} bins from {len(files)} files")
-        for i, bin_files in enumerate(bins):
-            print(f"Bin {i}: {len(bin_files)} files")
-        CODE
-    >>>
-
-    output {
-        File bins_json = "bins.json"
-    }
-
-    runtime {
-        docker: "python:3.9-slim"
-        cpu: 4
-        memory: "16GB"
-        preemptible: 2
-        bootDiskSizeGb: 20
-        disks: "local-disk 50 HDD"
     }
 }
 
@@ -899,7 +873,7 @@ task directDIA_single_vm {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -978,8 +952,32 @@ task pulsar_step1_binned {
 
         # Run Pulsar Step 1 on ALL files in the bin at once (batch processing)
         echo "Running Pulsar Step 1 for bin ~{bin_index} (batch processing ${file_count} files)..."
+
+        # List files for troubleshooting
+        echo "Files in input directory:"
+        ls -1 "${input_dir}"
+
+        # Construct -r flags for each file
+        # Use a loop to append "-r <filepath>" to a variable
+        cmd_flags=""
+        for f in "${input_dir}"/*; do
+             if [ -f "$f" ]; then
+                cmd_flags="${cmd_flags} -r $f"
+             fi
+        done
+
+        # Prepare command string for printing (back-tracing)
+        cmd_string="spectronaut lg -se Pulsar ${cmd_flags} -fasta ~{fasta_1} ~{if defined(
+             fasta_2) then "-fasta " + fasta_2 else ""} ~{if defined(fasta_3) then "-fasta "
+             + fasta_3 else ""} ~{if defined(analysis_schema) then "-s " + analysis_schema
+             else ""} --pulsarStage pulsarStep1 -a ${output_dir}/search_archive_step1_bin_~{
+             bin_index}.psar -o ${output_dir} -setTemp ${tmp_dir}"
+
+        echo "Command being run:"
+        echo "${cmd_string}"
+
         spectronaut lg -se Pulsar \
-            -d "${input_dir}" \
+            ${cmd_flags} \
             -fasta "~{fasta_1}" \
             ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
             ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
@@ -1103,11 +1101,11 @@ task pulsar_step1_binned {
     >>>
 
     output {
-        Array[File] intermediate_archive = glob("*.psar")
+        File intermediate_archive = glob("*.psar")[0]
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -1299,11 +1297,11 @@ task pulsar_step2_combine_models {
     >>>
 
     output {
-        Array[File] optimized_models = glob("*.qsp")
+        File optimized_models = glob("*.qsp")[0]
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -1382,8 +1380,30 @@ task pulsar_step3_binned {
 
         # Run Pulsar Step 3 with optimized models (batch processing)
         echo "Running Pulsar Step 3 for bin ~{bin_index} with optimized models..."
+
+        # List files for troubleshooting
+        echo "Files in input directory:"
+        ls -1 "${input_dir}"
+
+        # Construct -r flags for each file
+        cmd_flags=""
+        for f in "${input_dir}"/*; do
+             if [ -f "$f" ]; then
+                cmd_flags="${cmd_flags} -r $f"
+             fi
+        done
+
+        # Prepare command string for printing (back-tracing)
+        cmd_string="spectronaut lg -se Pulsar ${cmd_flags} -sa ~{intermediate_archive} -a ${output_dir}/search_archive_bin_~{
+             bin_index}.psar --optimizedModels ~{optimized_models} --pulsarStage pulsarStep3 -o ${output_dir} -n ~{
+             experiment_name}_bin_~{bin_index} ~{if defined(analysis_schema) then "-s " + analysis_schema
+             else ""} -setTemp ${tmp_dir}"
+
+        echo "Command being run:"
+        echo "${cmd_string}"
+
         spectronaut lg -se Pulsar \
-            -d "${input_dir}" \
+            ${cmd_flags} \
             -sa "~{intermediate_archive}" \
             -a "${output_dir}/search_archive_bin_~{bin_index}.psar" \
             --optimizedModels "~{optimized_models}" \
@@ -1507,11 +1527,11 @@ task pulsar_step3_binned {
     >>>
 
     output {
-        Array[File] final_archive = glob("*.psar")
+        File final_archive = glob("*.psar")[0]
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -1691,7 +1711,7 @@ task combine_final_archives {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -1900,11 +1920,11 @@ task dia_analysis_binned {
     >>>
 
     output {
-        Array[File] sne_files = glob("*.sne")
+        File sne_files = glob("*.sne")[0]
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -2100,12 +2120,36 @@ task combine_sne {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
         disks: "local-disk ~{ceil(total_input_size_gb * disk_size_multiplier)} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
+    }
+}
+
+task sum_floats {
+    input {
+        Array[Float] sizes
+    }
+
+    command <<<
+        python3 <<CODE
+        sizes = [~{sep="," sizes}]
+        print(sum(sizes))
+        CODE
+    >>>
+
+    output {
+        Float total_size = read_float(stdout())
+    }
+
+    runtime {
+        docker: "python:3.9-slim"
+        cpu: 1
+        memory: "2GB"
+        preemptible: 2
     }
 }
