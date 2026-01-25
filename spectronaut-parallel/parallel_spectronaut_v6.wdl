@@ -60,6 +60,11 @@ workflow parallel_spectronaut {
         Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
         # ============================================================================
+        # Disk Sizing Configuration
+        # ============================================================================
+        Float disk_size_multiplier = 3.0  # Multiplier for disk size calculation (default: 3)
+
+        # ============================================================================
         # Resource Configuration
         # ============================================================================
 
@@ -270,7 +275,7 @@ workflow parallel_spectronaut {
             cpu = directDIA_single_vm_cpu,
             ram_gb = directDIA_single_vm_ram_gb,
             n_preemptible = n_preemptible_directDIA_single_vm,
-            allocated_disk_gb = ceil(finalized_total_size_gb * 4),
+            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
         }
     }
 
@@ -295,7 +300,7 @@ workflow parallel_spectronaut {
                 ram_gb = pulsar_step1_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step1,
-                allocated_disk_gb = ceil(bin_size_per_vm * 3),
+                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
 
@@ -314,7 +319,7 @@ workflow parallel_spectronaut {
             enzyme_database = enzyme_database,
             analysis_schema = search_settings_01_Pulsar_search,
             n_preemptible = n_preemptible_pulsar_step2,
-            allocated_disk_gb = ceil(size(intermediate_archives, "GB") * 5),
+            allocated_disk_gb = ceil(size(intermediate_archives, "GB") * disk_size_multiplier),
         }
 
         # ========================================================================
@@ -333,7 +338,7 @@ workflow parallel_spectronaut {
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step3,
 
-                allocated_disk_gb = ceil(bin_size_per_vm * 3),
+                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
 
@@ -351,7 +356,7 @@ workflow parallel_spectronaut {
             enzyme_database = enzyme_database,
             analysis_schema = search_settings_02_library_generation,
             n_preemptible = n_preemptible_combine_archives,
-            allocated_disk_gb = ceil(size(final_archives, "GB") * 5),
+            allocated_disk_gb = ceil(size(final_archives, "GB") * disk_size_multiplier),
         }
 
         # ========================================================================
@@ -369,7 +374,7 @@ workflow parallel_spectronaut {
                 bin_index = i,
 
                 n_preemptible = n_preemptible_dia_analysis,
-                allocated_disk_gb = ceil(bin_size_per_vm * 3),
+                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
 
@@ -392,7 +397,7 @@ workflow parallel_spectronaut {
 
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
-            allocated_disk_gb = ceil(size(all_sne, "GB") * 4),
+            allocated_disk_gb = ceil(size(all_sne, "GB") * disk_size_multiplier),
         }
     }
 
