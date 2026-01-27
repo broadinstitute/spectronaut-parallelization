@@ -460,7 +460,7 @@ task list_files {
         memory: "16GB"
         preemptible: 2
         bootDiskSizeGb: 20
-        disks: "local-disk 50 HDD"
+        disks: "local-disk 100 HDD"
     }
 }
 
@@ -543,7 +543,7 @@ task create_bins {
         memory: "16GB"
         preemptible: 2
         bootDiskSizeGb: 20
-        disks: "local-disk 50 HDD"
+        disks: "local-disk 100 HDD"
     }
 }
 
@@ -592,7 +592,7 @@ task calculate_directory_size_gcs {
         memory: "16GB"
         preemptible: 2
         bootDiskSizeGb: 20
-        disks: "local-disk 50 HDD"
+        disks: "local-disk 100 HDD"
     }
 }
 
@@ -2105,7 +2105,8 @@ task sum_floats {
 
     command <<<
         python3 <<CODE
-        sizes = [~{sep="," sizes}]
+        with open("~{write_lines(sizes)}") as f:
+            sizes = [float(line.strip()) for line in f if line.strip()]
         print(sum(sizes))
         CODE
     >>>
@@ -2116,8 +2117,10 @@ task sum_floats {
 
     runtime {
         docker: "python:3.9-slim"
-        cpu: 1
-        memory: "2GB"
+        cpu: 4
+        memory: "16GB"
         preemptible: 2
+        bootDiskSizeGb: 20
+        disks: "local-disk 100 HDD"
     }
 }
