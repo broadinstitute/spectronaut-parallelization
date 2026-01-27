@@ -198,13 +198,14 @@ workflow parallel_spectronaut {
     # PHASE II: HTRMS Conversion
     # ============================================================================
     # Flatten all bins to get individual files for conversion
-    Array[File] all_input_files = read_lines(list_files.file_list)
+    # Note: read_lines returns Array[String], which is correct since these are GCS paths
+    Array[String] all_input_file_paths = read_lines(list_files.file_list)
 
     if (do_conversion) {
         # Scatter over each individual file (one file per VM)
-        scatter (input_file in all_input_files) {
+        scatter (input_file_path in all_input_file_paths) {
             call htrms_conversion { input:
-                input_file_path = input_file,
+                input_file_path = input_file_path,
                 convert_schema = convert_schema,
                 n_preemptible = n_preemptible_htrms_conversion,
             }
@@ -217,15 +218,17 @@ workflow parallel_spectronaut {
 
     # Select converted files or original files
     # htrms_conversion.htrms_file is Array[File]? result of scatter
-    # Use select_first to handle the optional
-    Array[File] files_for_search = select_first([
+    # all_input_file_paths is Array[String] (GCS paths)
+    # Use select_first to handle the optional; WDL coerces File to String as needed
+    Array[String] files_for_search = select_first([
         htrms_conversion.htrms_file,
-        all_input_files,
+        all_input_file_paths,
     ])
 
-    Float finalized_total_size_gb = if do_conversion then select_first([
+    Float finalized_total_size_gb = select_first([
         sum_floats.total_size,
-    ]) else total_input_size_gb
+        total_input_size_gb,
+    ])
 
     # ============================================================================
     # PHASE III: Conditional Execution - Single VM vs Parallel
@@ -250,7 +253,7 @@ workflow parallel_spectronaut {
         create_bins.calculated_num_vms_file,
     ])) else 1
 
-    Array[Array[File]] search_file_bins = if (num_vms > 1) then read_json(select_first([
+    Array[Array[String]] search_file_bins = if (num_vms > 1) then read_json(select_first([
         create_bins.bins_json,
     ])) else []
 
@@ -428,11 +431,23 @@ task list_files {
         gcloud storage ls "~{gcs_path}" > "${raw_listing}"
 
         # Remove totals, trim trailing slashes, empty lines, filter out directory itself, unique
-        grep -v 'TOTAL:' "${raw_listing}" | \
+        # Use || true to prevent grep from failing if no matches (set -e will exit otherwise)
+        (grep -v 'TOTAL:' "${raw_listing}" || true) | \
             sed 's:/*$::' | \
             sed '/^[[:space:]]*$/d' | \
-            grep -v "^${normalized_path}$" | \
+            (grep -v "^${normalized_path}$" || true) | \
             sort -u > "${cleaned_listing}"
+
+        # Validate that at least one file was found
+        file_count=$(wc -l < "${cleaned_listing}")
+        if [ "${file_count}" -eq 0 ]; then
+            echo "ERROR: No files found in directory: ~{gcs_path}" >&2
+            exit 1
+        fi
+        echo "Found ${file_count} files in directory"
+
+        # Ensure file is written to disk before Cromwell attempts delocalization
+        sync
     >>>
 
     output {
@@ -469,11 +484,10 @@ task create_bins {
 
         num_bins = ~{num_bins}
 
-        # Cap num_bins at 50 if user requested more than 100
-        if num_bins > 100:
-            print(f"WARNING: Requested {num_bins} VMs, which exceeds maximum of 100")
-            print(f"Reducing num_bins to 50 for resource optimization")
-            num_bins = 50
+        # Cap num_bins at 80
+        if num_bins > 80:
+            print(f"WARNING: Requested {num_bins} VMs, capping at maximum of 80")
+            num_bins = 80
 
         # Validate num_bins
         if num_bins < 1:
@@ -491,12 +505,6 @@ task create_bins {
         if actual_bins < num_bins:
             print(f"WARNING: Requested {num_bins} bins, but only {len(files)} files available")
             print(f"Setting actual_bins = {actual_bins}")
-
-        # Safety check: Cap actual_bins at 50 if it exceeds 100
-        if actual_bins > 100:
-            print(f"WARNING: Calculated {actual_bins} bins, which exceeds maximum of 100")
-            print(f"Reducing actual_bins to 50 for resource optimization")
-            actual_bins = 50
 
         # Ensure at least 1 bin if files exist
         if actual_bins < 1 and len(files) > 0:
@@ -553,10 +561,12 @@ task calculate_directory_size_gcs {
         echo "Calculating size of GCS directory: ${normalized_path}"
 
         # Use gcloud storage du to get total size
-        # Output format: <bytes> <path>
-        size_bytes=$(gcloud storage du -s "${normalized_path}" | awk '{print $1}')
+        # The -s flag gives summary, output format: <bytes>  <path>
+        # Use awk to safely extract just the numeric bytes value (strip any non-numeric chars)
+        size_bytes=$(gcloud storage du -s "${normalized_path}" 2>/dev/null | awk 'NR==1 {gsub(/[^0-9]/,"",$1); print $1}')
 
-        if [ -z "${size_bytes}" ] || [ "${size_bytes}" -eq 0 ]; then
+        # Validate size_bytes is numeric and non-empty
+        if ! [[ "${size_bytes}" =~ ^[0-9]+$ ]] || [ -z "${size_bytes}" ] || [ "${size_bytes}" -eq 0 ]; then
             echo "WARNING: Directory size is 0 or could not be determined" >&2
             # Set minimum size to avoid zero disk allocation
             size_bytes=1073741824  # 1 GB minimum
@@ -565,6 +575,9 @@ task calculate_directory_size_gcs {
         # Convert bytes to GB
         size_gb=$(awk "BEGIN {printf \"%.2f\", ${size_bytes} / (1024^3)}")
         echo "${size_gb}" > total_size_gb.txt
+
+        # Ensure file is written to disk before Cromwell attempts delocalization
+        sync
 
         echo "Total directory size: ${size_gb} GB (${size_bytes} bytes)"
     >>>
@@ -644,7 +657,7 @@ task htrms_conversion {
 task directDIA_single_vm {
     input {
         File fasta_1
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
@@ -862,7 +875,7 @@ task directDIA_single_vm {
 task pulsar_step1_binned {
     input {
         File fasta_1
-        Array[File] input_files
+        Array[String] input_files
         Int cpu
         Int ram_gb
         Int bin_index
@@ -1287,7 +1300,7 @@ task pulsar_step3_binned {
     input {
         File intermediate_archive
         File optimized_models
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
@@ -1691,7 +1704,7 @@ task combine_final_archives {
 task dia_analysis_binned {
     input {
         File search_archive
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
