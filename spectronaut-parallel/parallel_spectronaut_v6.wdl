@@ -57,12 +57,12 @@ workflow parallel_spectronaut {
         # HTRMS Conversion Configuration
         # ============================================================================
         Boolean do_conversion = true  # Enable HTRMS file conversion (default: true)
-        Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
         # ============================================================================
         # Disk Sizing Configuration
         # ============================================================================
-        Float disk_size_multiplier = 3.0  # Multiplier for disk size calculation (default: 3)
+        Float disk_size_multiplier = 3  # Multiplier for disk size calculation (default: 3)
+        Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
         # ============================================================================
         # Resource Configuration
@@ -319,7 +319,8 @@ workflow parallel_spectronaut {
             enzyme_database = enzyme_database,
             analysis_schema = search_settings_01_Pulsar_search,
             n_preemptible = n_preemptible_pulsar_step2,
-            allocated_disk_gb = ceil(size(intermediate_archives, "GB") * disk_size_multiplier),
+            allocated_disk_gb = ceil(size(intermediate_archives, "GB") * disk_size_multiplier
+                ),
         }
 
         # ========================================================================
