@@ -219,9 +219,8 @@ workflow parallel_spectronaut {
     # Select converted files or original files
     # htrms_conversion.htrms_file is Array[File]? result of scatter
     # all_input_file_paths is Array[String] (GCS paths)
-    # Use explicit defined() check to avoid select_first with mixed optional types
-    # This pattern matches the working nonparallel workflow
-    Array[File] files_for_search = if defined(htrms_conversion.htrms_file)
+    # Use Array[String] for all paths - tasks use gcloud cp -r to handle both files and folders
+    Array[String] files_for_search = if defined(htrms_conversion.htrms_file)
         then select_first([htrms_conversion.htrms_file])
         else all_input_file_paths
 
@@ -253,7 +252,7 @@ workflow parallel_spectronaut {
         create_bins.calculated_num_vms_file,
     ])) else 1
 
-    Array[Array[File]] search_file_bins = if (num_vms > 1) then read_json(select_first([
+    Array[Array[String]] search_file_bins = if (num_vms > 1) then read_json(select_first([
         create_bins.bins_json,
     ])) else []
 
@@ -657,7 +656,7 @@ task htrms_conversion {
 task directDIA_single_vm {
     input {
         File fasta_1
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
@@ -705,19 +704,19 @@ task directDIA_single_vm {
 
         output_zip="${cromwell_root}/spectronaut_output.zip"
 
-        # Copy all input files to input directory
-        # Files are already localized by Cromwell (Array[File] type)
-        echo "Copying input files to input directory..."
+        # Download all input files from GCS to input directory
+        # Using gcloud cp -r to handle both files and folder inputs
+        echo "Downloading input files to input directory..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                echo "Copying: ${input_file}"
-                cp -r "${input_file}" "${input_dir}/"
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
-        # Verify files were copied
+        # Verify files were downloaded
         file_count=$(find "${input_dir}" -type f | wc -l)
-        echo "Copied ${file_count} files to input directory"
+        echo "Downloaded ${file_count} files to input directory"
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
@@ -873,7 +872,7 @@ task directDIA_single_vm {
 task pulsar_step1_binned {
     input {
         File fasta_1
-        Array[File] input_files
+        Array[String] input_files
         Int cpu
         Int ram_gb
         Int bin_index
@@ -913,19 +912,19 @@ task pulsar_step1_binned {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy ALL binned files to input directory (no for-loop processing)
-        # Files are already localized by Cromwell (Array[File] type)
-        echo "Copying all input files for bin ~{bin_index}..."
+        # Download ALL binned files from GCS to input directory
+        # Using gcloud cp -r to handle both files and folder inputs
+        echo "Downloading all input files for bin ~{bin_index}..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                echo "Copying: ${input_file}"
-                cp -r "${input_file}" "${input_dir}/"
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
-        # Verify files were copied
+        # Verify files were downloaded
         file_count=$(find "${input_dir}" -type f | wc -l)
-        echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
+        echo "Downloaded ${file_count} files to input directory for bin ~{bin_index}"
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
@@ -1296,7 +1295,7 @@ task pulsar_step3_binned {
     input {
         File intermediate_archive
         File optimized_models
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
@@ -1332,19 +1331,19 @@ task pulsar_step3_binned {
 
         mkdir -p "${input_dir}" "${output_dir}" "${tmp_dir}"
 
-        # Copy ALL binned files to input_dir (same files as step 1)
-        # Files are already localized by Cromwell (Array[File] type)
-        echo "Copying input files for bin ~{bin_index}..."
+        # Download ALL binned files from GCS to input_dir (same files as step 1)
+        # Using gcloud cp -r to handle both files and folder inputs
+        echo "Downloading input files for bin ~{bin_index}..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                echo "Copying: ${input_file}"
-                cp -r "${input_file}" "${input_dir}/"
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
-        # Verify files were copied
+        # Verify files were downloaded
         file_count=$(find "${input_dir}" -type f | wc -l)
-        echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
+        echo "Downloaded ${file_count} files to input directory for bin ~{bin_index}"
 
         # Import enzyme database if provided
         if [ ~{defined(enzyme_database)} = true ]; then
@@ -1698,7 +1697,7 @@ task combine_final_archives {
 task dia_analysis_binned {
     input {
         File search_archive
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
@@ -1737,13 +1736,13 @@ task dia_analysis_binned {
         tmp_dir="${cromwell_root}/work_dia_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all input files to input directory
-        # Files are already localized by Cromwell (Array[File] type)
-        echo "Copying input files..."
+        # Download all input files from GCS to input directory
+        # Using gcloud cp -r to handle both files and folder inputs
+        echo "Downloading input files..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                echo "Copying: ${input_file}"
-                cp -r "${input_file}" "${input_dir}/"
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
