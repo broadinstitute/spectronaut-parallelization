@@ -455,7 +455,7 @@ task list_files {
     }
 
     runtime {
-        docker: "google/cloud-sdk:slim"
+        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:alpine"
         cpu: 4
         memory: "16GB"
         preemptible: 2
@@ -587,7 +587,7 @@ task calculate_directory_size_gcs {
     }
 
     runtime {
-        docker: "google/cloud-sdk:slim"
+        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:alpine"
         cpu: 4
         memory: "16GB"
         preemptible: 2
