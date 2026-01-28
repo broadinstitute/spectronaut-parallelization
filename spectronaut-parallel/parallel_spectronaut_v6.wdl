@@ -321,8 +321,7 @@ workflow parallel_spectronaut {
             enzyme_database = enzyme_database,
             analysis_schema = search_settings_01_Pulsar_search,
             n_preemptible = n_preemptible_pulsar_step2,
-            allocated_disk_gb = ceil(size(intermediate_archives, "GB") * disk_size_multiplier
-                ),
+            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
         }
 
         # ========================================================================
@@ -359,7 +358,7 @@ workflow parallel_spectronaut {
             enzyme_database = enzyme_database,
             analysis_schema = search_settings_02_library_generation,
             n_preemptible = n_preemptible_combine_archives,
-            allocated_disk_gb = ceil(size(final_archives, "GB") * disk_size_multiplier),
+            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
         }
 
         # ========================================================================
@@ -400,7 +399,7 @@ workflow parallel_spectronaut {
 
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
-            allocated_disk_gb = ceil(size(all_sne, "GB") * disk_size_multiplier),
+            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
         }
     }
 
@@ -815,7 +814,7 @@ task directDIA_single_vm {
             max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
 
-            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+            if [ "$limit_bytes" != "max" ] && [ "$limit_bytes" -gt 0 ]; then
                 limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
                 usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
                     'BEGIN { printf "%.2f", (max / lim) * 100 }')
@@ -1043,7 +1042,7 @@ task pulsar_step1_binned {
             max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
 
-            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+            if [ "$limit_bytes" != "max" ] && [ "$limit_bytes" -gt 0 ]; then
                 limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
                 usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
                     'BEGIN { printf "%.2f", (max / lim) * 100 }')
@@ -1237,7 +1236,7 @@ task pulsar_step2_combine_models {
             max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
 
-            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+            if [ "$limit_bytes" != "max" ] && [ "$limit_bytes" -gt 0 ]; then
                 limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
                 usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
                     'BEGIN { printf "%.2f", (max / lim) * 100 }')
@@ -1460,7 +1459,7 @@ task pulsar_step3_binned {
             max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
 
-            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+            if [ "$limit_bytes" != "max" ] && [ "$limit_bytes" -gt 0 ]; then
                 limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
                 usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
                     'BEGIN { printf "%.2f", (max / lim) * 100 }')
@@ -1640,7 +1639,7 @@ task combine_final_archives {
             max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
 
-            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+            if [ "$limit_bytes" != "max" ] && [ "$limit_bytes" -gt 0 ]; then
                 limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
                 usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
                     'BEGIN { printf "%.2f", (max / lim) * 100 }')
@@ -1841,7 +1840,7 @@ task dia_analysis_binned {
             max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
 
-            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+            if [ "$limit_bytes" != "max" ] && [ "$limit_bytes" -gt 0 ]; then
                 limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
                 usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
                     'BEGIN { printf "%.2f", (max / lim) * 100 }')
@@ -2035,7 +2034,7 @@ task combine_sne {
             max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
             echo "Actual Peak RAM: ${max_mem_gb} GB"
 
-            if [ "$limit_bytes" -gt 0 ] && [ "$limit_bytes" != "max" ]; then
+            if [ "$limit_bytes" != "max" ] && [ "$limit_bytes" -gt 0 ]; then
                 limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
                 usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
                     'BEGIN { printf "%.2f", (max / lim) * 100 }')
