@@ -15,7 +15,8 @@
       "Bash(git push:*)",
       "mcp__ide__getDiagnostics",
       "Bash(pip3 install:*)",
-      "Bash(womtool validate:*)"
+      "Bash(womtool validate:*)",
+      "Bash(git -C /Users/cameronlian/Desktop/development/panoply-workflow-dev status)"
     ],
     "deny": [],
     "ask": []
