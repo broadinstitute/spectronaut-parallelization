@@ -28,7 +28,6 @@ workflow panoply_spectronaut {
 
         # Workflow control
         Boolean do_conversion = true
-        Boolean do_search = true
         Int n_preemptible_htrms_conversion = 2  # Preemptible attempts for conversion
 
         # Resource configuration
@@ -56,35 +55,32 @@ workflow panoply_spectronaut {
     }
 
     # Select converted files or original files for search
-    # convert_htrms.htrms_file is Array[Array[File]]? due to conditional block
-    # Use defined() check with select_first to handle the optional, then flatten
+    # convert_htrms.htrms_file is Array[File]? due to conditional + scatter
     Array[String] files_for_search = if defined(convert_htrms.htrms_file)
-        then flatten(select_first([convert_htrms.htrms_file]))
+        then select_first([convert_htrms.htrms_file])
         else input_files
 
-    if (do_search) {
-        call spectronaut { input:
-            experiment_name = experiment_name,
-            input_files = files_for_search,
-            fasta = fasta,
-            analysis_settings = analysis_settings,
-            condition_setup = condition_setup,
-            fasta_1 = fasta_1,
-            enzyme_database = enzyme_database,
-            spectral_library = spectral_library,
-            spectral_library_1 = spectral_library_1,
-            report_schema = report_schema,
-            report_schema_1 = report_schema_1,
-            report_schema_2 = report_schema_2,
-            json_settings = json_settings,
-            num_cpus = num_cpus,
-            ram_gb = ram_gb,
-            local_disk_gb = local_disk_gb,
-        }
+    call spectronaut { input:
+        experiment_name = experiment_name,
+        input_files = files_for_search,
+        fasta = fasta,
+        analysis_settings = analysis_settings,
+        condition_setup = condition_setup,
+        fasta_1 = fasta_1,
+        enzyme_database = enzyme_database,
+        spectral_library = spectral_library,
+        spectral_library_1 = spectral_library_1,
+        report_schema = report_schema,
+        report_schema_1 = report_schema_1,
+        report_schema_2 = report_schema_2,
+        json_settings = json_settings,
+        num_cpus = num_cpus,
+        ram_gb = ram_gb,
+        local_disk_gb = local_disk_gb,
     }
 
     output {
-        File? spectronaut_output = spectronaut.spectronaut_output
+        File spectronaut_output = spectronaut.spectronaut_output
     }
 }
 
@@ -175,11 +171,11 @@ task convert_htrms {
     >>>
 
     output {
-        Array[File] htrms_file = glob("*.htrms")
+        File htrms_file = glob("*.htrms")[0]
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpuPlatform: "AMD Rome"
         cpu: 16
         memory: "32GB"
@@ -191,7 +187,7 @@ task convert_htrms {
 
 task spectronaut {
     meta {
-        author: "D. R. Mani, C. Lian"
+        author: "C. Lian"
         email: "proteogenomics@broadinstitute.org"
     }
 
@@ -222,7 +218,7 @@ task spectronaut {
     command <<<
         set -euo pipefail
 
-        echo "=== Spectronaut analysis task started (broadcptacdev/panoply_spectronaut:v20.3) ===" >&2
+        echo "=== Spectronaut analysis task started (broadcptacdev/panoply_spectronaut:v20.4) ===" >&2
         echo "directDIA mode: ~{if !defined(spectral_library) then "true" else "false"}" >&2
 
         cromwell_root=$(pwd)
@@ -269,7 +265,7 @@ task spectronaut {
 
         zip -r "${out_zip}" "${out_dir}" -x \*.zip
 
-        echo "=== Spectronaut search complete (broadcptacdev/panoply_spectronaut:v20.3) ===" >&2
+        echo "=== Spectronaut search complete (broadcptacdev/panoply_spectronaut:v20.4) ===" >&2
     >>>
 
     output {
@@ -277,7 +273,7 @@ task spectronaut {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.3"
+        docker: "broadcptacdev/panoply_spectronaut:v20.4"
         cpuPlatform: "AMD Rome"
         memory: "~{ram_gb}GB"  # 896GB max for AMD Rome
         bootDiskSizeGb: 32

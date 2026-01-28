@@ -28,7 +28,6 @@ workflow panoply_spectronaut {
 
         # Workflow control
         Boolean do_conversion = true
-        Boolean do_search = true
         Int n_preemptible_htrms_conversion = 2  # Preemptible attempts for conversion
 
         # Resource configuration
@@ -56,35 +55,32 @@ workflow panoply_spectronaut {
     }
 
     # Select converted files or original files for search
-    # convert_htrms.htrms_file is Array[Array[File]]? due to conditional block
-    # Use defined() check with select_first to handle the optional, then flatten
-    Array[File] files_for_search = if defined(convert_htrms.htrms_file)
-        then flatten(select_first([convert_htrms.htrms_file]))
+    # convert_htrms.htrms_file is Array[File]? due to conditional + scatter
+    Array[String] files_for_search = if defined(convert_htrms.htrms_file)
+        then select_first([convert_htrms.htrms_file])
         else input_files
 
-    if (do_search) {
-        call spectronaut { input:
-            experiment_name = experiment_name,
-            input_files = files_for_search,
-            fasta = fasta,
-            analysis_settings = analysis_settings,
-            condition_setup = condition_setup,
-            fasta_1 = fasta_1,
-            enzyme_database = enzyme_database,
-            spectral_library = spectral_library,
-            spectral_library_1 = spectral_library_1,
-            report_schema = report_schema,
-            report_schema_1 = report_schema_1,
-            report_schema_2 = report_schema_2,
-            json_settings = json_settings,
-            num_cpus = num_cpus,
-            ram_gb = ram_gb,
-            local_disk_gb = local_disk_gb,
-        }
+    call spectronaut { input:
+        experiment_name = experiment_name,
+        input_files = files_for_search,
+        fasta = fasta,
+        analysis_settings = analysis_settings,
+        condition_setup = condition_setup,
+        fasta_1 = fasta_1,
+        enzyme_database = enzyme_database,
+        spectral_library = spectral_library,
+        spectral_library_1 = spectral_library_1,
+        report_schema = report_schema,
+        report_schema_1 = report_schema_1,
+        report_schema_2 = report_schema_2,
+        json_settings = json_settings,
+        num_cpus = num_cpus,
+        ram_gb = ram_gb,
+        local_disk_gb = local_disk_gb,
     }
 
     output {
-        File? spectronaut_output = spectronaut.spectronaut_output
+        File spectronaut_output = spectronaut.spectronaut_output
     }
 }
 
@@ -175,7 +171,7 @@ task convert_htrms {
     >>>
 
     output {
-        Array[File] htrms_file = glob("*.htrms")
+        File htrms_file = glob("*.htrms")[0]
     }
 
     runtime {
@@ -191,14 +187,14 @@ task convert_htrms {
 
 task spectronaut {
     meta {
-        author: "D. R. Mani, C. Lian"
+        author: "C. Lian"
         email: "proteogenomics@broadinstitute.org"
     }
 
     input {
         # Search databases
         File fasta
-        Array[File] input_files  # Array of input files (converted HTRMS or raw)
+        Array[String] input_files  # Array of input files (converted HTRMS or raw)
         String experiment_name
         File? analysis_settings
         File? condition_setup
@@ -237,11 +233,7 @@ task spectronaut {
         echo "Copying input files to data directory..." >&2
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                if [ -d "${input_file}" ]; then
-                    cp -r "${input_file}" "${input_dir}/"
-                elif [ -f "${input_file}" ]; then
-                    cp "${input_file}" "${input_dir}/"
-                fi
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
