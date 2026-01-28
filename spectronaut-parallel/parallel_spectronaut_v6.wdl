@@ -286,7 +286,7 @@ workflow parallel_spectronaut {
     if (calculated_num_vms > 1) {
 
         # Calculate approximate size per VM for disk allocation
-        Float bin_size_per_vm = finalized_total_size_gb / calculated_num_vms + 20
+        Float bin_size_per_vm = finalized_total_size_gb / calculated_num_vms + 25
 
         # ========================================================================
         # STEP 1.1: Generate intermediate search archives per bin (scatter)
@@ -455,7 +455,7 @@ task list_files {
     }
 
     runtime {
-        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:alpine"
+        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:stable"
         cpu: 4
         memory: "16GB"
         preemptible: 2
@@ -587,7 +587,7 @@ task calculate_directory_size_gcs {
     }
 
     runtime {
-        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:alpine"
+        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:stable"
         cpu: 4
         memory: "16GB"
         preemptible: 2
@@ -709,11 +709,8 @@ task directDIA_single_vm {
         echo "Copying input files to input directory..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                if [ -d "${input_file}" ]; then
-                    cp -r "${input_file}" "${input_dir}/"
-                elif [ -f "${input_file}" ]; then
-                    cp "${input_file}" "${input_dir}/"
-                fi
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -919,11 +916,8 @@ task pulsar_step1_binned {
         echo "Copying all input files for bin ~{bin_index}..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                if [ -d "${input_file}" ]; then
-                    cp -r "${input_file}" "${input_dir}/"
-                elif [ -f "${input_file}" ]; then
-                    cp "${input_file}" "${input_dir}/"
-                fi
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -1340,11 +1334,8 @@ task pulsar_step3_binned {
         echo "Copying input files for bin ~{bin_index}..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                if [ -d "${input_file}" ]; then
-                    cp -r "${input_file}" "${input_dir}/"
-                elif [ -f "${input_file}" ]; then
-                    cp "${input_file}" "${input_dir}/"
-                fi
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
@@ -1747,11 +1738,8 @@ task dia_analysis_binned {
         echo "Copying input files..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                if [ -d "${input_file}" ]; then
-                    cp -r "${input_file}" "${input_dir}/"
-                elif [ -f "${input_file}" ]; then
-                    cp "${input_file}" "${input_dir}/"
-                fi
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
