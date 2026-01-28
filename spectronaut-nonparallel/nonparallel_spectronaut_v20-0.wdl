@@ -58,7 +58,7 @@ workflow panoply_spectronaut {
     # Select converted files or original files for search
     # convert_htrms.htrms_file is Array[Array[File]]? due to conditional block
     # Use defined() check with select_first to handle the optional, then flatten
-    Array[File] files_for_search = if defined(convert_htrms.htrms_file)
+    Array[String] files_for_search = if defined(convert_htrms.htrms_file)
         then flatten(select_first([convert_htrms.htrms_file]))
         else input_files
 
@@ -198,7 +198,7 @@ task spectronaut {
     input {
         # Search databases
         File fasta
-        Array[File] input_files  # Array of input files (converted HTRMS or raw)
+        Array[String] input_files  # Array of input files (converted HTRMS or raw)
         String experiment_name
         File? analysis_settings
         File? condition_setup
@@ -237,11 +237,7 @@ task spectronaut {
         echo "Copying input files to data directory..." >&2
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                if [ -d "${input_file}" ]; then
-                    cp -r "${input_file}" "${input_dir}/"
-                elif [ -f "${input_file}" ]; then
-                    cp "${input_file}" "${input_dir}/"
-                fi
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
