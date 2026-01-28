@@ -82,17 +82,17 @@ workflow parallel_spectronaut {
     # Compute preset configurations based on experiment_type
     # Pulsar Step 1: Generate intermediate search archives (similar to directDIA search)
     Map[String, Int] pulsar_step1_cpu_presets = {
-        "proteome": 32,
-        "ptm": 48,
+        "proteome": 64,
+        "ptm": 64,
     }
     Map[String, Int] pulsar_step1_ram_gb_presets = {
-        "proteome": 32,
-        "ptm": 32,
+        "proteome": 64,
+        "ptm": 96,
     }
 
     # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
     Map[String, Int] pulsar_step2_cpu_presets = {
-        "proteome": 24,
+        "proteome": 32,
         "ptm": 48,
     }
     Map[String, Int] pulsar_step2_ram_gb_presets = {
@@ -102,28 +102,28 @@ workflow parallel_spectronaut {
 
     # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
     Map[String, Int] pulsar_step3_cpu_presets = {
-        "proteome": 32,
-        "ptm": 48,
+        "proteome": 64,
+        "ptm": 128,
     }
     Map[String, Int] pulsar_step3_ram_gb_presets = {
-        "proteome": 32,
-        "ptm": 32,
-    }
-
-    # Combine final archives into .kit library
-    Map[String, Int] combine_archives_cpu_presets = {
-        "proteome": 24,
-        "ptm": 32,
-    }
-    Map[String, Int] combine_archives_ram_gb_presets = {
         "proteome": 64,
         "ptm": 96,
     }
 
+    # Combine final archives into .kit library
+    Map[String, Int] combine_archives_cpu_presets = {
+        "proteome": 32,
+        "ptm": 48,
+    }
+    Map[String, Int] combine_archives_ram_gb_presets = {
+        "proteome": 64,
+        "ptm": 128,
+    }
+
     # DirectDIA single VM (does both search and analysis in one step)
     Map[String, Int] directDIA_single_vm_cpu_presets = {
-        "proteome": 32,
-        "ptm": 64,
+        "proteome": 64,
+        "ptm": 128,
     }
     Map[String, Int] directDIA_single_vm_ram_gb_presets = {
         "proteome": 128,
@@ -132,8 +132,8 @@ workflow parallel_spectronaut {
 
     # DIA analysis per bin (after library is created)
     Map[String, Int] dia_analysis_cpu_presets = {
-        "proteome": 24,
-        "ptm": 32,
+        "proteome": 64,
+        "ptm": 64,
     }
     Map[String, Int] dia_analysis_ram_gb_presets = {
         "proteome": 64,
@@ -141,12 +141,12 @@ workflow parallel_spectronaut {
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
-        "proteome": 16,
-        "ptm": 16,
+        "proteome": 32,
+        "ptm": 32,
     }
     Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 64,
-        "ptm": 96,
+        "proteome": 96,
+        "ptm": 128,
     }
 
     # Validate experiment_type and fallback to "proteome" if invalid
