@@ -1566,7 +1566,7 @@ task combine_final_archives {
             -sad "${work_archives}" \
             -k "${cromwell_root}/${merged_library}" \
             -o "${cromwell_root}" \
-            ~{if defined(analysis_schema) then "-s " + analysis_schema else ""} \
+            ~{if defined(analysis_schema) then "-es " + analysis_schema else ""} \
             -setTemp "${tmp_dir}" \
             2>&1 | tee merge_archives.log
 
