@@ -558,26 +558,57 @@ task calculate_directory_size_gcs {
 
         echo "Calculating size of GCS directory: ${normalized_path}"
 
-        # Use gcloud storage du to get total size
-        # The -s flag gives summary, output format: <bytes>  <path>
-        # Use awk to safely extract just the numeric bytes value (strip any non-numeric chars)
-        size_bytes=$(gcloud storage du -s "${normalized_path}" 2>/dev/null | awk 'NR==1 {gsub(/[^0-9]/,"",$1); print $1}')
+        # Get raw output to a file for debugging if needed
+        gcloud storage du -s "${normalized_path}" > raw_du_output.txt 2>/dev/null || true
 
-        # Validate size_bytes is numeric and non-empty
-        if ! [[ "${size_bytes}" =~ ^[0-9]+$ ]] || [ -z "${size_bytes}" ] || [ "${size_bytes}" -eq 0 ]; then
-            echo "WARNING: Directory size is 0 or could not be determined" >&2
-            # Set minimum size to avoid zero disk allocation
-            size_bytes=1073741824  # 1 GB minimum
-        fi
+        # Use Python for robust parsing and math (avoids Bash integer overflows)
+        python3 <<CODE
+import sys
+import re
 
-        # Convert bytes to GB
-        size_gb=$(awk "BEGIN {printf \"%.2f\", ${size_bytes} / (1024^3)}")
-        echo "${size_gb}" > total_size_gb.txt
+try:
+    with open("raw_du_output.txt", "r") as f:
+        content = f.read().strip()
+
+    if not content:
+        print("WARNING: Empty output from du, defaulting to 1GB")
+        size_bytes = 1073741824
+    else:
+        # Take the first whitespace-separated token
+        first_token = content.split()[0]
+
+        # Ensure it contains only digits
+        digits_only = re.sub("[^0-9]", "", first_token)
+
+        if not digits_only:
+            print(f"WARNING: Could not parse size from '{content}', defaulting to 1GB")
+            size_bytes = 1073741824
+        else:
+            size_bytes = int(digits_only)
+
+    # Sanity Check: Cap at 100 TB (100 * 1024^4 bytes) to prevent Yottabyte overflows
+    # 100 TB = 109951162777600 bytes
+    MAX_BYTES = 109951162777600
+    if size_bytes > MAX_BYTES:
+        print(f"WARNING: Detected suspicious size {size_bytes} bytes. Capping at 100TB.")
+        size_bytes = MAX_BYTES
+
+    # Convert to GB
+    size_gb = size_bytes / (1024**3)
+
+    # Write to output file
+    with open("total_size_gb.txt", "w") as out:
+        out.write(f"{size_gb:.2f}")
+
+    print(f"Total directory size: {size_gb:.2f} GB ({size_bytes} bytes)")
+
+except Exception as e:
+    print(f"ERROR in python script: {e}")
+    sys.exit(1)
+CODE
 
         # Ensure file is written to disk before Cromwell attempts delocalization
         sync
-
-        echo "Total directory size: ${size_gb} GB (${size_bytes} bytes)"
     >>>
 
     output {
@@ -586,11 +617,11 @@ task calculate_directory_size_gcs {
 
     runtime {
         docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:stable"
-        cpu: 4
-        memory: "16GB"
+        cpu: 2
+        memory: "4GB"
         preemptible: 2
         bootDiskSizeGb: 20
-        disks: "local-disk 100 HDD"
+        disks: "local-disk 20 HDD"
     }
 }
 
