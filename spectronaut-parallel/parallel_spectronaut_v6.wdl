@@ -561,51 +561,56 @@ task calculate_directory_size_gcs {
         # Get raw output to a file for debugging if needed
         gcloud storage du -s "${normalized_path}" > raw_du_output.txt 2>/dev/null || true
 
-        # Use Python for robust parsing and math (avoids Bash integer overflows)
-        python3 <<CODE
-import sys
-import re
+        # Use awk for robust parsing and math (avoids Bash integer overflows)
+        # awk can handle large numbers and floating-point arithmetic
+        awk '
+        BEGIN {
+            # Default to 1GB if no valid size found
+            default_bytes = 1073741824
+            max_bytes = 109951162777600  # 100 TB cap
+            size_bytes = 0
+            found = 0
+        }
+        {
+            # Read the file content
+            content = $0
+            if (length(content) == 0) {
+                next
+            }
 
-try:
-    with open("raw_du_output.txt", "r") as f:
-        content = f.read().strip()
+            # Extract first token (the size in bytes)
+            first_token = $1
 
-    if not content:
-        print("WARNING: Empty output from du, defaulting to 1GB")
-        size_bytes = 1073741824
-    else:
-        # Take the first whitespace-separated token
-        first_token = content.split()[0]
+            # Remove non-digits to get clean number
+            gsub(/[^0-9]/, "", first_token)
 
-        # Ensure it contains only digits
-        digits_only = re.sub("[^0-9]", "", first_token)
+            if (length(first_token) > 0) {
+                size_bytes = first_token + 0  # Convert to number
+                found = 1
+            }
+        }
+        END {
+            if (!found || size_bytes == 0) {
+                print "WARNING: Could not parse size, defaulting to 1GB" > "/dev/stderr"
+                size_bytes = default_bytes
+            }
 
-        if not digits_only:
-            print(f"WARNING: Could not parse size from '{content}', defaulting to 1GB")
-            size_bytes = 1073741824
-        else:
-            size_bytes = int(digits_only)
+            # Sanity check: cap at 100 TB
+            if (size_bytes > max_bytes) {
+                print "WARNING: Detected suspicious size " size_bytes " bytes. Capping at 100TB." > "/dev/stderr"
+                size_bytes = max_bytes
+            }
 
-    # Sanity Check: Cap at 100 TB (100 * 1024^4 bytes) to prevent Yottabyte overflows
-    # 100 TB = 109951162777600 bytes
-    MAX_BYTES = 109951162777600
-    if size_bytes > MAX_BYTES:
-        print(f"WARNING: Detected suspicious size {size_bytes} bytes. Capping at 100TB.")
-        size_bytes = MAX_BYTES
+            # Convert bytes to GB (divide by 1024^3)
+            size_gb = size_bytes / (1024 * 1024 * 1024)
 
-    # Convert to GB
-    size_gb = size_bytes / (1024**3)
+            # Write to output file
+            printf "%.2f\n", size_gb > "total_size_gb.txt"
 
-    # Write to output file
-    with open("total_size_gb.txt", "w") as out:
-        out.write(f"{size_gb:.2f}")
-
-    print(f"Total directory size: {size_gb:.2f} GB ({size_bytes} bytes)")
-
-except Exception as e:
-    print(f"ERROR in python script: {e}")
-    sys.exit(1)
-CODE
+            # Print summary
+            printf "Total directory size: %.2f GB (%d bytes)\n", size_gb, size_bytes
+        }
+        ' raw_du_output.txt
 
         # Ensure file is written to disk before Cromwell attempts delocalization
         sync
