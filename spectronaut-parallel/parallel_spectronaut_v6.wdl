@@ -63,6 +63,7 @@ workflow parallel_spectronaut {
         # ============================================================================
         Float disk_size_multiplier = 3  # Multiplier for disk size calculation (default: 3)
         Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
+        Int num_files  # Number of input files for size estimation when do_conversion=false
 
         # ============================================================================
         # Resource Configuration
@@ -187,13 +188,6 @@ workflow parallel_spectronaut {
         gcs_path = file_directory,
     }
 
-    # Calculate directory size for disk allocation
-    call calculate_directory_size_gcs { input:
-        gcs_directory_path = file_directory,
-    }
-
-    Float total_input_size_gb = calculate_directory_size_gcs.total_size_gb
-
     # ============================================================================
     # PHASE II: HTRMS Conversion
     # ============================================================================
@@ -224,10 +218,15 @@ workflow parallel_spectronaut {
         then select_first([htrms_conversion.htrms_file])
         else all_input_file_paths
 
-    Float finalized_total_size_gb = select_first([
-        sum_floats.total_size,
-        total_input_size_gb,
-    ])
+    # Calculate total size based on conversion mode
+    # When conversion is disabled, estimate using num_files * 30 GB per file
+    Float estimated_size_gb = num_files * 30.0
+
+    # Use actual HTRMS sizes when conversion enabled, otherwise use estimation
+    Float finalized_total_size_gb = if defined(sum_floats.total_size) then
+        select_first([sum_floats.total_size])
+    else
+        estimated_size_gb
 
     # ============================================================================
     # PHASE III: Conditional Execution - Single VM vs Parallel
@@ -537,55 +536,6 @@ task create_bins {
 
     runtime {
         docker: "python:3.9-slim"
-        cpu: 4
-        memory: "16GB"
-        preemptible: 2
-        bootDiskSizeGb: 20
-        disks: "local-disk 100 HDD"
-    }
-}
-
-task calculate_directory_size_gcs {
-    input {
-        String gcs_directory_path
-    }
-
-    command <<<
-        set -euo pipefail
-
-        # Normalize path (remove trailing slash)
-        normalized_path=$(echo "~{gcs_directory_path}" | sed 's:/*$::')
-
-        echo "Calculating size of GCS directory: ${normalized_path}"
-
-        # Use gcloud storage du to get total size
-        # The -s flag gives summary, output format: <bytes>  <path>
-        # Use awk to safely extract just the numeric bytes value (strip any non-numeric chars)
-        size_bytes=$(gcloud storage du -s "${normalized_path}" 2>/dev/null | awk 'NR==1 {gsub(/[^0-9]/,"",$1); print $1}')
-
-        # Validate size_bytes is numeric and non-empty
-        if ! [[ "${size_bytes}" =~ ^[0-9]+$ ]] || [ -z "${size_bytes}" ] || [ "${size_bytes}" -eq 0 ]; then
-            echo "WARNING: Directory size is 0 or could not be determined" >&2
-            # Set minimum size to avoid zero disk allocation
-            size_bytes=1073741824  # 1 GB minimum
-        fi
-
-        # Convert bytes to GB
-        size_gb=$(awk "BEGIN {printf \"%.2f\", ${size_bytes} / (1024^3)}")
-        echo "${size_gb}" > total_size_gb.txt
-
-        # Ensure file is written to disk before Cromwell attempts delocalization
-        sync
-
-        echo "Total directory size: ${size_gb} GB (${size_bytes} bytes)"
-    >>>
-
-    output {
-        Float total_size_gb = read_float("total_size_gb.txt")
-    }
-
-    runtime {
-        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:stable"
         cpu: 4
         memory: "16GB"
         preemptible: 2
