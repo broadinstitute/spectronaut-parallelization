@@ -62,6 +62,7 @@ workflow parallel_spectronaut {
         # Disk Sizing Configuration
         # ============================================================================
         Float disk_size_multiplier = 3  # Multiplier for disk size calculation (default: 3)
+        Float average_file_size_gb = 1.5  # Average file size in GB for disk allocation (default: 1.5)
         Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
         # ============================================================================
@@ -187,12 +188,12 @@ workflow parallel_spectronaut {
         gcs_path = file_directory,
     }
 
-    # Calculate directory size for disk allocation
-    call calculate_directory_size_gcs { input:
-        gcs_directory_path = file_directory,
+    # Count files and calculate estimated size for disk allocation
+    call count_files { input:
+        file_list = list_files.file_list,
     }
 
-    Float total_input_size_gb = calculate_directory_size_gcs.total_size_gb
+    Float total_input_size_gb = count_files.num_files * average_file_size_gb
 
     # ============================================================================
     # PHASE II: HTRMS Conversion
@@ -545,79 +546,28 @@ task create_bins {
     }
 }
 
-task calculate_directory_size_gcs {
+task count_files {
     input {
-        String gcs_directory_path
+        File file_list
     }
 
     command <<<
         set -euo pipefail
 
-        # Normalize path (remove trailing slash)
-        normalized_path=$(echo "~{gcs_directory_path}" | sed 's:/*$::')
+        # Count non-empty lines in the file list
+        num_files=$(grep -c . "~{file_list}" || echo "0")
 
-        echo "Calculating size of GCS directory: ${normalized_path}"
+        echo "Number of files found: ${num_files}"
 
-        # Get raw output to a file for debugging if needed
-        gcloud storage du -s "${normalized_path}" > raw_du_output.txt 2>/dev/null || true
-
-        # Use awk for robust parsing and math (avoids Bash integer overflows)
-        # awk can handle large numbers and floating-point arithmetic
-        awk '
-        BEGIN {
-            # Default to 1GB if no valid size found
-            default_bytes = 1073741824
-            max_bytes = 109951162777600  # 100 TB cap
-            size_bytes = 0
-            found = 0
-        }
-        {
-            # Read the file content
-            content = $0
-            if (length(content) == 0) {
-                next
-            }
-
-            # Extract first token (the size in bytes)
-            first_token = $1
-
-            # Remove non-digits to get clean number
-            gsub(/[^0-9]/, "", first_token)
-
-            if (length(first_token) > 0) {
-                size_bytes = first_token + 0  # Convert to number
-                found = 1
-            }
-        }
-        END {
-            if (!found || size_bytes == 0) {
-                print "WARNING: Could not parse size, defaulting to 1GB" > "/dev/stderr"
-                size_bytes = default_bytes
-            }
-
-            # Sanity check: cap at 100 TB
-            if (size_bytes > max_bytes) {
-                print "WARNING: Detected suspicious size " size_bytes " bytes. Capping at 100TB." > "/dev/stderr"
-                size_bytes = max_bytes
-            }
-
-            # Convert bytes to GB (divide by 1024^3)
-            size_gb = size_bytes / (1024 * 1024 * 1024)
-
-            # Write to output file
-            printf "%.2f\n", size_gb > "total_size_gb.txt"
-
-            # Print summary
-            printf "Total directory size: %.2f GB (%d bytes)\n", size_gb, size_bytes
-        }
-        ' raw_du_output.txt
+        # Write to output file
+        echo "${num_files}" > num_files.txt
 
         # Ensure file is written to disk before Cromwell attempts delocalization
         sync
     >>>
 
     output {
-        Float total_size_gb = read_float("total_size_gb.txt")
+        Int num_files = read_int("num_files.txt")
     }
 
     runtime {
