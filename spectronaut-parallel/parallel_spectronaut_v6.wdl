@@ -62,7 +62,7 @@ workflow parallel_spectronaut {
         # Disk Sizing Configuration
         # ============================================================================
         Float disk_size_multiplier = 3  # Multiplier for disk size calculation (default: 3)
-        Float average_file_size_gb = 1.5  # Average file size in GB for disk allocation (default: 1.5)
+        Float average_file_size_gb = 15  # Average file size in GB for disk allocation (default: 15)
         Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
         # ============================================================================
@@ -183,17 +183,13 @@ workflow parallel_spectronaut {
     # PHASE I: Discovery
     # ============================================================================
 
-    # List all raw files in the input directory
+    # List all raw files in the input directory and count them
     call list_files { input:
         gcs_path = file_directory,
     }
 
-    # Count files and calculate estimated size for disk allocation
-    call count_files { input:
-        file_list = list_files.file_list,
-    }
-
-    Float total_input_size_gb = count_files.num_files * average_file_size_gb
+    # Calculate estimated size for disk allocation
+    Float total_input_size_gb = list_files.num_files * average_file_size_gb
 
     # ============================================================================
     # PHASE II: HTRMS Conversion
@@ -445,12 +441,16 @@ task list_files {
         fi
         echo "Found ${file_count} files in directory"
 
+        # Write file count to output file
+        echo "${file_count}" > num_files.txt
+
         # Ensure file is written to disk before Cromwell attempts delocalization
         sync
     >>>
 
     output {
         File file_list = "file_list.txt"
+        Int num_files = read_int("num_files.txt")
     }
 
     runtime {
@@ -543,40 +543,6 @@ task create_bins {
         preemptible: 2
         bootDiskSizeGb: 20
         disks: "local-disk 100 HDD"
-    }
-}
-
-task count_files {
-    input {
-        File file_list
-    }
-
-    command <<<
-        set -euo pipefail
-
-        # Count non-empty lines in the file list
-        num_files=$(grep -c . "~{file_list}" || echo "0")
-
-        echo "Number of files found: ${num_files}"
-
-        # Write to output file
-        echo "${num_files}" > num_files.txt
-
-        # Ensure file is written to disk before Cromwell attempts delocalization
-        sync
-    >>>
-
-    output {
-        Int num_files = read_int("num_files.txt")
-    }
-
-    runtime {
-        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:stable"
-        cpu: 2
-        memory: "4GB"
-        preemptible: 2
-        bootDiskSizeGb: 20
-        disks: "local-disk 20 HDD"
     }
 }
 
