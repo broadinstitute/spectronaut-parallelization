@@ -342,7 +342,7 @@ workflow parallel_spectronaut {
         }
 
         # Collect all final archives (one per bin)
-        Array[File] final_archives = pulsar_step3_binned.final_archive
+        Array[String] final_archives = pulsar_step3_binned.final_archive
 
         # ========================================================================
         # STEP 1.4: Merge final search archives into single .kit library
@@ -377,7 +377,7 @@ workflow parallel_spectronaut {
             }
         }
 
-        Array[File] all_sne = dia_analysis_binned.sne_files
+        Array[String] all_sne = dia_analysis_binned.sne_files
 
         # ========================================================================
         # STEP 3: Combine scattered SNE files and generate reports
@@ -1467,7 +1467,7 @@ task pulsar_step3_binned {
 
 task combine_final_archives {
     input {
-        Array[File] input_archives
+        Array[String] input_archives
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
@@ -1504,7 +1504,7 @@ task combine_final_archives {
         echo "Copying archives for merging..."
         while IFS= read -r archive; do
             if [ -n "${archive}" ]; then
-                cp "${archive}" "${work_archives}/"
+                gcloud storage cp -r "${archive}" "${work_archives}/"
             fi
         done < ~{write_lines(input_archives)}
 
@@ -1848,7 +1848,7 @@ task dia_analysis_binned {
 
 task combine_sne {
     input {
-        Array[File] sne_files
+        Array[String] sne_files
         String experiment_name
         Int ram_gb
         Int cpu
@@ -1893,7 +1893,7 @@ task combine_sne {
         echo "Copying SNE files for merging..."
         while IFS= read -r sne_file; do
             if [ -n "${sne_file}" ]; then
-                cp "${sne_file}" "${sne_dir}/"
+                gcloud storage cp -r "${sne_file}" "${sne_dir}/"
             fi
         done < ~{write_lines(sne_files)}
 
