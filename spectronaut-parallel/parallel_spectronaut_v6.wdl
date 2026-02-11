@@ -293,6 +293,7 @@ workflow parallel_spectronaut {
                 fasta_2 = fasta_2,
                 fasta_3 = fasta_3,
                 enzyme_database = enzyme_database,
+                do_conversion = do_conversion,
                 cpu = pulsar_step1_cpu,
                 ram_gb = pulsar_step1_ram_gb,
                 bin_index = i,
@@ -330,6 +331,7 @@ workflow parallel_spectronaut {
                 experiment_name = experiment_name,
                 analysis_schema = directDIA_settings,
                 enzyme_database = enzyme_database,
+                do_conversion = do_conversion,
                 cpu = pulsar_step3_cpu,
                 ram_gb = pulsar_step3_ram_gb,
                 bin_index = i,
@@ -831,6 +833,7 @@ task pulsar_step1_binned {
         File? fasta_2
         File? fasta_3
         File? enzyme_database
+        Boolean do_conversion
     }
 
     command <<<
@@ -888,14 +891,17 @@ task pulsar_step1_binned {
         echo "Files in input directory:"
         ls -1 "${input_dir}"
 
-        # Construct -r flags for each file
-        # Use a loop to append "-r <filepath>" to a variable
-        cmd_flags=""
-        for f in "${input_dir}"/*; do
-             if [ -f "$f" ]; then
-                cmd_flags="${cmd_flags} -r $f"
-             fi
-        done
+        # Construct input flags: -r per file (converted HTRMS) or -d directory (raw files)
+        if [ "~{do_conversion}" = "true" ]; then
+            cmd_flags=""
+            for f in "${input_dir}"/*; do
+                 if [ -f "$f" ]; then
+                    cmd_flags="${cmd_flags} -r $f"
+                 fi
+            done
+        else
+            cmd_flags="-d ${input_dir}"
+        fi
 
         # Prepare command string for printing (back-tracing)
         cmd_string="spectronaut lg -se Pulsar ${cmd_flags} -fasta ~{fasta_1} ~{if defined(
@@ -1252,6 +1258,7 @@ task pulsar_step3_binned {
         Int n_preemptible
         File analysis_schema
         File? enzyme_database
+        Boolean do_conversion
     }
 
     command <<<
@@ -1306,13 +1313,17 @@ task pulsar_step3_binned {
         echo "Files in input directory:"
         ls -1 "${input_dir}"
 
-        # Construct -r flags for each file
-        cmd_flags=""
-        for f in "${input_dir}"/*; do
-             if [ -f "$f" ]; then
-                cmd_flags="${cmd_flags} -r $f"
-             fi
-        done
+        # Construct input flags: -r per file (converted HTRMS) or -d directory (raw files)
+        if [ "~{do_conversion}" = "true" ]; then
+            cmd_flags=""
+            for f in "${input_dir}"/*; do
+                 if [ -f "$f" ]; then
+                    cmd_flags="${cmd_flags} -r $f"
+                 fi
+            done
+        else
+            cmd_flags="-d ${input_dir}"
+        fi
 
         # Prepare command string for printing (back-tracing)
         cmd_string="spectronaut lg -se Pulsar ${cmd_flags} -sa ~{intermediate_archive} -a ${output_dir}/search_archive_bin_~{
