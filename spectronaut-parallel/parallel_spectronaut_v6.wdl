@@ -54,7 +54,7 @@ workflow parallel_spectronaut {
         # ============================================================================
         # HTRMS Conversion Configuration
         # ============================================================================
-        Boolean do_conversion = true  # Enable HTRMS file conversion (default: true)
+        Boolean do_conversion = false  # Enable HTRMS file conversion (default: false)
 
         # ============================================================================
         # Disk Sizing Configuration
