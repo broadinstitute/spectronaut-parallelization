@@ -17,6 +17,11 @@ version development
 workflow parallel_spectronaut {
     input {
         File fasta_1  # Primary FASTA database file (required)
+
+        # ============================================================================
+        # Analysis Settings & Schemas
+        # ============================================================================
+        File directDIA_settings  # Settings file for all Spectronaut tasks (except HTRMS conversion)
         # ============================================================================
         # Required Workflow Parameters
         # ============================================================================
@@ -29,11 +34,6 @@ workflow parallel_spectronaut {
         File? fasta_2  # Additional FASTA database file
         File? fasta_3  # Additional FASTA database file
         File? enzyme_database  # Custom enzyme database
-
-        # ============================================================================
-        # Analysis Settings & Schemas
-        # ============================================================================
-        File directDIA_settings  # Settings file for all Spectronaut tasks (except HTRMS conversion)
         File? json_settings  # JSON settings for Spectronaut
         File? condition_setup  # Experimental condition setup
 
@@ -215,9 +215,10 @@ workflow parallel_spectronaut {
     # htrms_conversion.htrms_file is Array[File]? result of scatter
     # all_input_file_paths is Array[String] (GCS paths)
     # Use Array[String] for all paths - tasks use gcloud cp -r to handle both files and folders
-    Array[String] files_for_search = if defined(htrms_conversion.htrms_file)
-        then select_first([htrms_conversion.htrms_file])
-        else all_input_file_paths
+    Array[String] files_for_search = if defined(htrms_conversion.htrms_file) then select_first(
+    [
+        htrms_conversion.htrms_file,
+    ]) else all_input_file_paths
 
     Float finalized_total_size_gb = select_first([
         sum_floats.total_size,
@@ -607,13 +608,13 @@ task htrms_conversion {
 task directDIA_single_vm {
     input {
         File fasta_1
+        File analysis_schema
         Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
         Int n_preemptible
-        File analysis_schema
         File? fasta_2
         File? fasta_3
         File? enzyme_database
@@ -823,17 +824,17 @@ task directDIA_single_vm {
 task pulsar_step1_binned {
     input {
         File fasta_1
+        File analysis_schema
         Array[String] input_files
+        Boolean do_conversion
         Int cpu
         Int ram_gb
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
-        File analysis_schema
         File? fasta_2
         File? fasta_3
         File? enzyme_database
-        Boolean do_conversion
     }
 
     command <<<
@@ -1053,6 +1054,7 @@ task pulsar_step1_binned {
 
 task pulsar_step2_combine_models {
     input {
+        File analysis_schema
         Array[File] intermediate_archives
         String experiment_name
         Int cpu
@@ -1060,7 +1062,6 @@ task pulsar_step2_combine_models {
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
-        File analysis_schema
     }
 
     command <<<
@@ -1249,16 +1250,16 @@ task pulsar_step3_binned {
     input {
         File intermediate_archive
         File optimized_models
+        File analysis_schema
         Array[String] input_files
         String experiment_name
+        Boolean do_conversion
         Int cpu
         Int ram_gb
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
-        File analysis_schema
         File? enzyme_database
-        Boolean do_conversion
     }
 
     command <<<
@@ -1474,13 +1475,13 @@ task pulsar_step3_binned {
 
 task combine_final_archives {
     input {
+        File analysis_schema
         Array[String] input_archives
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
-        File analysis_schema
     }
 
     command <<<
@@ -1525,7 +1526,7 @@ task combine_final_archives {
             -sad "${work_archives}" \
             -k "${cromwell_root}/${merged_library}" \
             -o "${cromwell_root}" \
-            -es "~{analysis_schema}" \
+            -s "~{analysis_schema}" \
             -setTemp "${tmp_dir}" \
             2>&1 | tee merge_archives.log
 
@@ -1655,6 +1656,7 @@ task combine_final_archives {
 task dia_analysis_binned {
     input {
         File search_archive
+        File analysis_schema
         Array[String] input_files
         String experiment_name
         Int cpu
@@ -1663,7 +1665,6 @@ task dia_analysis_binned {
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
-        File analysis_schema
     }
 
     command <<<
@@ -1855,6 +1856,7 @@ task dia_analysis_binned {
 
 task combine_sne {
     input {
+        File analysis_schema
         Array[String] sne_files
         String experiment_name
         Int ram_gb
@@ -1866,7 +1868,6 @@ task combine_sne {
         File? report_schema_2
         File? report_schema_3
         File? report_schema_4
-        File analysis_schema
         File? enzyme_database
     }
 
