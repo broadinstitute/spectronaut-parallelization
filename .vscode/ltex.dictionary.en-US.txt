@@ -1,0 +1,12 @@
+Spectronaut
+DIA
+Biognosys
+preemptible
+Orbitrap
+Bruker
+timsTOF
+directDIA
+gcloud
+hybrid-DIA
+Preemptible
+terra

@@ -1,0 +1,62 @@
+---
+config:
+  theme: 'base'
+---
+flowchart TB
+        %% Inputs & Outputs
+        input([Distribute files across VMs])
+        ext_lib[/External Spectral Library/]
+        output([Experimental-level Output])
+
+        %% Pre-processing
+        %% do_conversion{Run HTRMS Conversion?}
+        htrms_conversion@{shape: processes, label: "HTRMS conversion\n(Optional)"}
+        vm_check{Number of VMs?}
+
+        %% do_conversion -- Yes --> htrms_conversion
+        %% do_conversion -- No --> vm_check
+        htrms_conversion --> vm_check
+
+        input --> htrms_conversion
+
+        %% Single VM Path
+        subgraph single_vm ["2A. Single-VM Workflow"]
+                direction TB
+                pulsar_single{Run Pulsar?}
+                directDIA@{shape: rect, label: Run directDIA}
+                single_dia@{shape: rect, label: Run DIA Analysis}
+
+                pulsar_single -- Yes --> directDIA
+                pulsar_single -- No --> single_dia
+        end
+
+        %% Multi VM Path
+        subgraph multi_vm ["2B. Multi-VM (Distributed) Workflow"]
+                pulsar_multi{Run Pulsar?}
+
+                subgraph pulsar_sub ["Pulsar Search"]
+                        p1@{shape: processes, label: "1. Generate VM-level<br/>intermediate archives"}
+                        p2@{shape: rect, label: "2. Generate<br/>experiment-level model"}
+                        p3@{shape: processes, label: "3. Generate VM-level<br/>final archives"}
+                        p4@{shape: rect, label: "4. Generate experiment-<br/>level search library"}
+                        p1 --> p2 --> p3 --> p4
+                end
+
+                subgraph dia_sub ["DIA Analysis"]
+                        d1@{shape: processes, label: "1. Perform DIA Analysis<br/>per VM"}
+                        d2@{shape: rect, label: "2. Generate experimental-<br/>level output"}
+                        d1 --> d2
+                end
+
+                pulsar_multi -- "Yes (directDIA)" --> p1
+                pulsar_multi -- "No (Hybrid-DIA)" --> d1
+                p4 --> d1
+        end
+
+        %% Main Routing
+        vm_check -- "== 1" --> pulsar_single
+        vm_check -- "> 1" --> pulsar_multi
+
+        ext_lib -.-> single_dia & d1
+
+        directDIA & single_dia & d2 --> output

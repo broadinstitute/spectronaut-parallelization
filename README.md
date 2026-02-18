@@ -1,149 +1,253 @@
-# Parallel Spectronaut Search Workflow
+# Parallelized Workflow for Spectronaut DIA Proteomics Analysis
 
-This workflow parallelizes Spectronaut searches by processing each data file in its own Google Cloud instance, reducing total runtime drastically for large-scale proteomics experiments at the same cost. 
+![cover](assets/cover-image.png)
 
-## Features
+- [:crystal\_ball: Overview](#crystal_ball-overview)
+  - [:sparkles: Key Features](#sparkles-key-features)
+  - [:mag: How Does Parallelization Work?](#mag-how-does-parallelization-work)
+- [:rocket: Getting Started](#rocket-getting-started)
+  - [1. Prerequisites \& Environment](#1-prerequisites--environment)
+  - [2. File Preparation \& Upload](#2-file-preparation--upload)
+  - [3. Execution \& Output](#3-execution--output)
+- [:bookmark\_tabs: Input Variables](#bookmark_tabs-input-variables)
+  - [1. Core Search Inputs](#1-core-search-inputs)
+  - [2. HTRMS Conversion](#2-htrms-conversion)
+  - [3. Hybrid-DIA Search](#3-hybrid-dia-search)
+  - [Resource \& Performance](#resource--performance)
+  - [Preemptible Instance](#preemptible-instance)
+- [:bar\_chart: Benchmarking](#bar_chart-benchmarking)
+- [:wrench: Troubleshooting](#wrench-troubleshooting)
+- [:file\_folder: Useful Resources](#file_folder-useful-resources)
+- [:phone: Contacts](#phone-contacts)
+- [:tada: Credits](#tada-credits)
 
-- **Parallel execution**: Each input raw file undergoes HTRMS conversion, search archive generation, and finally DIA analysis in parallel across independent VMs, eliminating sequential processing bottlenecks
+## :crystal_ball: Overview
 
-### Enhanced User Experience  
+Spectronaut is the primary software platform that we use for data-independent acquisition (DIA) proteomics analysis at the Proteomics Platform. Conventional Spectronaut workflows process samples sequentially on a single compute node, creating a critical throughput bottleneck that limits the scalability in large-scale studies. Although Biognosys has proposed a conceptual framework, a production-ready, fully validated implementation has not previously existed. To address this gap, we developed a cloud-native workflow that distributes analysis across virtual machines (VMs) on Google Cloud Platformat (GCP) via [Terra](https://terra.bio/). 
 
-- **Full pipeline orchestration**: Seamlessly chains HTRMS conversion → directDIA search → library merging → DIA analysis → SNE combination without manual intervention
+**This implementation achieves >20x runtime improvement while simultaneously driving down compute costs.**
 
-- **Experiment-type presets**: Configures CPU, memory, and disk multipliers based on user's input experiment type
+|                                                                                                   ![runtime-cost-comparison](assets/presentation_time_cost_comparison.png)                                                                                                    |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Comparison of runtime and compute cost.** Processing a dataset of 90 proteome samples acquired on a Thermo Fisher Orbitrap Astral Mass Spectrometer, the parallelized workflow demonstrates a 78.4% reduction in total runtime alongside a 67.4% reduction in compute cost. |
 
-  - CPU and memory are configured differently for each task to accommodate their relative resource requirements
+### :sparkles: Key Features
 
-  <img src="./assets/image-20251104214350213.png" alt="image-20251104214350213"  />
-  
-  - **Proteome presets**
-    - directDIA: 80 CPU cores, 256 GB RAM
-    - Archive Combine: 16 CPU cores, 384 GB RAM
-    - DIA Analysis: 32 CPU cores, 128 GB RAM
-    - SNE Combine: 16 CPU cores, 384 GB RAM
-    - Disk size multiplier: 15x
-  - **PTM presets**
-    - directDIA: 128 CPU cores, 512 GB RAM
-    - Archive Combine: 16 CPU cores, 640 GB RAM
-    - DIA Analysis: 64 CPU cores, 256 GB RAM
-    - SNE Combine: 16 CPU cores, 640 GB RAM
-    - Disk size multiplier: 20x
+#### Performance & Scalability 
 
-- **Dynamic disk sizing**: Disk sizes are automatically calculated based on actual input data sizes, preventing insufficient disk size failures while eliminate over-provisioning cost 
+- **Robust Parallelization Framework:** Implements the two-step Pulsar framework (Spectronaut v20.3+), eliminating batch-dependent variability by generating a spectral library using aggregated information from all samples.
+- **Flexible Scaling:** Set `num_vms` to match your Spectronaut token budget, and the workflow will scale dynamically to your available resources.
+- **Parallelized HTRMS Conversion:** Accelerates HTRMS conversion by distributing one file per VM
+- **Auto-Resource Tuning:** Dynamically allocates CPU, RAM, and disk space based on input size, preventing resource overhead and reducing configuration burden for users with limited computational experience
 
-### Technical Advantages
+#### Scientific Versatility
 
-- **Preemptible instance support**: Optional use of preemptible VMs for cost reduction (configurable via `n_preemptible`)
-- **Checkpoint recovery**: Failed jobs can resume from the point of failure without re-running completed tasks
+- **Comprehensive DIA Support:** Automatically switches between directDIA, hybrid-DIA, and library-based DIA modes according to user preference.
+- **Fully Customizable:** Provides granular access to Spectronaut search parameters to tailor the analysis to your experimental needs.
+- **Proven Reliability:** Validated against the legacy workflow to ensure consistent identification and quantification performance. See [Benchmarking](#bar_chart-benchmarking) for details.
 
-- **Robust event logging and error handling**: Tracks all task executions in the job log and validates outputs at critical steps with diagnostic error messages  
+#### Additional Features
 
-## Workflow Overview
+- **Cost-Efficient Computing:** Support for [Preemptible Instances](https://cloud.google.com/compute/docs/instances/preemptible) and [Call Caching](https://support.terra.bio/hc/en-us/articles/360047664872-Call-caching-How-it-works-and-when-to-use-it) drives down compute cost and enables restarting a failed run from the exact point of failure.
+- **Verbose Logging:** Streamlines troubleshooting experience.
+- **Backward Compatible:** Seamlessly reverts to the legacy pipeline when `num_vms = 1`.
 
-![image-20251104215637563](./assets/image-20251104215637563.png)
+### :mag: How Does Parallelization Work?
 
-### 1. File Discovery (`list_files`)
-Enumerates all files in the provided GCS directory (`file_directory`), generating a manifest of input files to process.
+|                                                                                                                                  ![flowchart](assets/flowchart-diagram.png)                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Flowchart of the parallelized workflow.** The workflow executes parallelization by default (Pipeline 2B), while providing backward support for the legacy pipeline (2A). A two-step framework in Pulsar search is adopted in parallelization. Tasks highlighted in red are executed in parallel across VMs. |
 
-### 2. Parallel HTRMS Conversion (`htrms_conversion` scatter)
-Each raw file is converted to HTRMS format in its own VM instance:
-- **Input**: Raw vendor format files (e.g., .raw, .wiff, .d)
-- **Schema**: Optional custom conversion schema (`convert_schema`)
-- **Output**: Converted .htrms files with preserved base filenames
-- **Resources**: 16 CPU, 32 GB RAM, 500 GB disk per file
+## :rocket: Getting Started
 
-### 3. Parallel Search Archive Generation via directDIA (`directDIA_search` scatter)
-Each HTRMS file undergoes directDIA search to generate an individual search archive:
-- **Input**: HTRMS files from step 2
-  - `directDIA_settings` is applied at this step
+### 1. Prerequisites & Environment
 
-- **Output**: .psar search archive files (one per input)
-- **Disk**: 1000 GB SSD per instance
-  - *Search archive generation is typically the most time-consuming step in the entire workflow, using SSD storage is recommended to optimize I/O performance*
+1. **Set Up Terra:**
+   1. **Sign In:** Go to [Terra](https://app.terra.bio). New to Terra? Register [here](https://support.terra.bio/hc/en-us/articles/360028235911-How-to-register-on-Terra-Google-SSO).
+   2. **Create Workspace:** Click **Workspaces** &rarr; **"+"**. Assign a name and billing project. See [Working with Terra workspaces](https://support.terra.bio/hc/en-us/articles/360024743371-Working-with-workspaces) for details.
 
+2. **Create Docker Image:**
+   1. Modify the [Dockerfile](src/docker) of your desired Spectronaut version and modify it according to instruction, then build and push the image to a registry, such as [Docker Hub](https://docs.docker.com/docker-hub/quickstart/#step-3-build-and-push-an-image-to-docker-hub) or [Google Cloud Registry](https://docs.cloud.google.com/artifact-registry/docs/docker). 
+      1. If you are new to Docker, check out this [step-by-step guide](https://docs.docker.com/get-started/introduction/build-and-push-first-image/).
+   2. **Update Workflow:** In the [WDL file](wdl_workflow/parallelized_search/parallel_spectronaut.wdl), replace the existing `docker` path with your new image path: `docker: "your-registry/your-spectronaut-image:tag"`.
+   3. **Import Workflow:** Go to **Library** &rarr; **Workflows** &rarr; **Terra Workflow Repository**. Select **"Create New Workflow"** and upload your updated [workflow file](wdl_workflow/parallelized_search/parallel_spectronaut.wdl). See [Create, edit, and share a new workflow](https://support.terra.bio/hc/en-us/articles/360031366091-Create-edit-and-share-a-new-workflow) for more details.
 
-### 4. File Size Calculation (`calculate_files_size`)
-Computes total size of all HTRMS files to determine disk requirements for subsequent operations.
+3. **Set Up `gcloud` CLI:**
+   1. **Install:** Follow the [gcloud CLI Installation Guide](https://cloud.google.com/sdk/docs/install). 
+   2. **Initialize:** Open your terminal and run:
 
-### 5. Library Merging (`combine_archives`)
-Merges all individual search archives into a single unified spectral library:
-- **Input**: All .psar files from step 3
-- **Output**: Single merged_library.kit file
-- **Disk**: Dynamic sizing = total HTRMS file size × disk size multiplier
+      ```bash
+      gcloud init
+      ```
 
-### 6. Parallel DIA Analysis (`dia_analysis` scatter)
-Each HTRMS file is re-analyzed against the merged library for final quantification:
-- **Input**: HTRMS files from step 2 + merged library from step 5
-  - `DIA_analysis_settings` is applied at this step
+   3. **Authenticate:** Log in using your **Terra-linked Google account**:
 
-- **Output**: .sne files containing quantification results
-- **Disk**: Fixed 1000 GB HDD per instance
+      ```bash
+      gcloud auth login
+      ```
 
-### 7. SNE Merging and Reporting (`combine_sne`)
-Combines all individual SNE files and generates final reports:
-- **Input**: All .sne files from step 6
-- **Output**: spectronaut_output.zip containing merged results and reports
-- **Disk**: Dynamic sizing = total HTRMS file size × disk size multiplier
+### 2. File Preparation & Upload
 
-## User Input Variables
+1. **Gather Input Files:** Ensure all necessary inputs (see [Input Variables](#input-variables)) are ready for upload.
+2. **Upload Files to Terra Workspace:**
+   1. **Find Your Workspace GCS Bucket:** In the **Cloud Information** box of your workspace **Dashboard**, copy the path to its GCS bucket.
+   2. **Upload Data:** Upload your files to the GCS bucket using the following commands:
 
-### Required Inputs
+      - **For a single file:**
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `file_directory` | String | GCS path to input files (e.g., `gs://my-bucket/input-files/`). Supports both raw vendor format files and HTRMS-converted files. |
-| `experiment_name` | String |  |
-| `fasta_1` | File | At least one FASTA protein database is required. |
+        ```bash
+        gcloud storage cp "/path/to/file" "gs://fc-your-bucket/destination/directory/"
+        ```
 
-### Experiment Configuration
+      - **For a folder:**
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `experiment_type` | String | `"proteome"` | Experiment type that determines resource presets. Options: `"proteome"` or `"ptm"`. PTM experiments receive more compute resources due to increased search space complexity. |
-| `n_preemptible` | Int | `0` | Number of preemptible VM retries for cost optimization. Set to 1-2 for cost reduction; keep at 0 for time-sensitive work. |
+        ```bash
+        gcloud storage cp -r "/path/to/folder/" "gs://fc-your-bucket/destination/folder/"
+        ```
 
-### Optional Inputs
+        > **Important:** The workflow expects the MS data directory to contain only the raw files intended for search. To prevent execution errors, do not include logs, reports, or other file formats in this folder.
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `fasta_2` | File | When multiple FASTA protein databases are provided, Spectronaut will combine and treat them as one database before performing analysis. |
-| `fasta_3` | File | See `fasta_2` description. |
-| `enzyme_database` | File | Custom enzyme database file. Automatically imported at all workflow stages (directDIA, library merge, DIA analysis, SNE combine). Required for non-standard enzymes (e.g., AspN, LysC). |
-| `convert_schema`      | File | Custom HTRMS conversion settings from HTRMS Conversion GUI.  |
-| `directDIA_schema` | File | Custom directDIA settings from Spectronaut GUI. If not provided, default settings are applied. |
-| `DIA_analysis_schema` | File | Custom DIA analysis settings from Spectronaut GUI. If not provided, default settings are applied. |
-| `json_settings` | File | JSON settings for DIA analysis. |
-| `condition_setup` | File | Condition/sample annotation file defining experimental groups, replicates, and conditions. Used during SNE merging for group-level statistics. |
-| `report_schema_1` | File | Primary report schema. Defines output columns, filters, and export format for the main results file. |
-| `report_schema_2` | File | Secondary report schema (e.g., protein-level summary). |
-| `report_schema_3` | File | Tertiary report schema (e.g., peptide-level quantification). |
-| `report_schema_4` | File | Quaternary report schema (e.g., precursor-level details). |
+See [How to move data to/from a Google bucket](https://support.terra.bio/hc/en-us/articles/4409101169051-How-to-move-data-to-from-a-Google-bucket) & [gcloud CLI cheat sheet](https://docs.cloud.google.com/sdk/docs/cheatsheet) for additional information.
 
-### Spectronaut Schemas and Settings
+### 3. Execution & Output
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `convert_schema` | File | Custom HTRMS conversion settings from HTRMS Conversion GUI.  |
-| `directDIA_schema` | File | Custom directDIA settings from Spectronaut GUI. If not provided, default settings are applied. |
-| `DIA_analysis_schema` | File | Custom DIA analysis settings from Spectronaut GUI. If not provided, default settings are applied. |
-| `json_settings` | File | JSON settings for DIA analysis. |
+1. **Configure & Launch:**
+   1. Open your workflow in the **Workflows** tab.
+   2. Check **"Use call caching"** to ensure failed runs restart at the point of failure (optional but **highly recommended**).
+   3. Provide the necessary inputs and click **Save** &rarr; **Launch**.
+2. **Completion:** Terra will send an email notification once the analysis is complete.
+3. **Download Spectronaut Output:** From the **Submission** page, you can [access the execution directory](https://support.terra.bio/hc/en-us/articles/360037096272-Submission-History-overview-monitoring-workflows#h_01G77NZN27609NJET0H13NVY6F:~:text=for%20each%20sample.-,Task%2Dlevel%20details%20(Job%20Manager%20or%20Workflow%20Dashboard),-From%20the%20submission), where you can find the following key Spectronaut outputs:
 
-## Outputs
+   |                Output                 |                          Path                          |
+   | ------------------------------------- | ------------------------------------------------------ |
+   | **Final Outputs and Reports**         | `call-combine_sne/spectronaut_output.zip`              |
+   | **Experiment-Level Spectral Library** | `call-combine_final_archives/merged_library.kit`       |
+   | **HTRMS-Converted Files**             | Locate within `call-htrms_conversion/` subdirectories. |
 
-| Output Variable | Type | Description |
-|----------------|------|-------------|
-| `spectronaut_output` | File | Final zipped archive (`spectronaut_output.zip`) containing merged SNE file, all generated reports, and logs from the SNE combine step. |
-| HTRMS files | File | Converted files are located in their respective shards within `call-htrms_conversion/`. To transfer all HTRMS files to your GCS bucket, run: `gcloud storage cp -r "gs://submission-output-bucket/call-htrms_conversion/**.htrms" "gs://your-bucket/destination/"` |
-| Merged search archive | File | Merged search archive is located in `call-combine_archives/merged_library.kit`. |
+#### **:outbox_tray: Copying HTRMS files to local or GCS bucket**
 
-## Benchmarks
+If you converted your data to HTRMS and need to move them to a local directory or another GCS bucket, run:
 
-### Runtime Savings: ~80% Faster than Sequential Processing 
+```bash
+gcloud storage cp -r "gs://fc-your-bucket/submissions/YOUR-JOB-ID/call-htrms_conversion/**.htrms" "/path/to/destination/"
+```
 
-*Benchmark based on a 36-sample experiment. Runtime savings scale with the number of samples.*
+## :bookmark_tabs: Input Variables
 
-<img src="./assets/image-20251104213107708.png" alt="image-20251104213107708"  />
+> **Important:** All input GCS paths must start with **"gs://..."**. 
 
-###### ### Further Cost Reduction with Preemptible Instances 
+### 1. Core Search Inputs
 
-<img src="./assets/image-20251104213216349.png" alt="image-20251104213216349"  />
+|       Variable        |        Type        |                                                                                             Description                                                                                              |
+| --------------------- | :----------------: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `num_vms`             |      Integer       | Number of VMs to run in parallel; each VM consumes one license token.<br>Set to `1` for single-VM directDIA mode (See [Parallelization Flowchart: Pipeline 2A](#mag-how-does-parallelization-work)). |
+| `experiment_name`     |       String       | Name of the experiment.                                                                                                                                                                              |
+| `experiment_type`     |       String       | Accepts `"proteome"` or `"ptm"`; determines CPU and RAM presets (Default: `"proteome"`).                                                                                                             |
+| `file_directory`      |       String       | GCS path to the folder containing the input MS files.                                                                                                                                                |
+| `directDIA_settings`  |        File        | GCS path to a `*.prop` directDIA settings file.                                                                                                                                                      |
+| `fasta_1`             |        File        | GCS path to a `*.fasta` or `*.bgsfasta` database.                                                                                                                                                    |
+| `fasta_[2-3]`         | File<br>(Optional) | GCS path to additional protein database.                                                                                                                                                             |
+| `report_schema_[1–4]` | File<br>(Optional) | GCS path to a `*.rs` report schema.                                                                                                                                                                  |
+| `enzyme_database`     | File<br>(Optional) | GCS path to a custom enzyme database for non-standard proteolytic enzymes.                                                                                                                           |
+| `condition_setup`     | File<br>(Optional) | GCS path to a `*.tsv` condition setup file ([template](doc/spectronaut_condition_setup_template.tsv)).                                                                                               |
+| `json_settings`       | File<br>(Optional) | GCS path to a `*.json` file to override Spectronaut search settings.                                                                                                                                 |
+
+### 2. HTRMS Conversion
+
+HTRMS conversion is **highly recommended** for Bruker timsTOF files (`*.d/`) to reduce analysis cost and improve analytic performance, but it is ***not* recommended** on Thermo Fisher Orbitrap files (`*.raw`).
+
+|     Variable     |         Type          |                          Description                           |
+| ---------------- | :-------------------: | -------------------------------------------------------------- |
+| `do_conversion`  | Boolean<br>(Optional) | Controls execution of HTRMS conversion (Default: `false`).     |
+| `convert_schema` |  File<br>(Optional)   | GCS path to a `*.prop` conversion schema from HTRMS Converter. |
+
+### 3. Hybrid-DIA Search
+
+|         Variable         |         Type          |                                      Description                                       |
+| ------------------------ | :-------------------: | -------------------------------------------------------------------------------------- |
+| `do_pulsar`              | Boolean<br>(Optional) | Controls execution of Pulsar Search (Default: `true`).                                 |
+| `spectral_library_[1-3]` | String<br>(Optional)  | GCS path to a pre-built spectral library (`*.kit`). Required when `do_pulsar = false`. |
+
+> **:small_red_triangle_down: Important:** 
+> 
+> - When `do_pulsar = false`, at least one spectral library must be provided for a standard library-based DIA analysis. 
+> - When `do_pulsar = true` and a spectral library is provided, the workflow will run hybrid-DIA analysis using the provided library **and** an *in silico* library generated via Pulsar Search.
+
+### Resource & Performance 
+
+|              Variable              |         Type          | Default |                                                                                               Description                                                                                               |
+| ---------------------------------- | :-------------------: | :-----: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generate_sne_large_experiment`    | Boolean<br>(Optional) | `true`  | Controls generation of the final `*.sne` file. Recommend to set to `false` for large experiments (N > 300 samples), where generating the final `*.sne` file may exceed available memory and disk space. |
+| `average_file_size_gb`             |  Float<br>(Optional)  |  `20`   | Estimated average input file size in GB; only used when `do_conversion = false`.                                                                                                                        |
+| `disk_size_multiplier`             |  Float<br>(Optional)  |   `3`   | Multiplier applied to total input size for disk allocation across most tasks. Increase if tasks run out of disk space.                                                                                  |
+| `sne_combine_disk_size_multiplier` |  Float<br>(Optional)  |   `6`   | Disk multiplier for the final `sne_combine` step only. Increase if the task runs out of disk space.                                                                                                     |
+
+> **Important:** When `generate_sne_large_experiment = false`, at least one `*.rs` report schema must be provided to obtain analysis results. 
+> After the search is complete, `sne_combine` must be re-run on all VM-level `*.sne` files to generate additional reports — you can find a standalone `sne_combine` workflow [here](wdl_workflow/spectronaut_modules/sne_combine.wdl). 
+
+### Preemptible Instance
+
+The `n_preemptible_*` variables control the number of attempts on preemptible VMs before falling back to Standard instances. Set to `0` to always use Standard instances.
+
+|              Variable               |         Type          | Default |
+| ----------------------------------- | :-------------------: | :-----: |
+| `n_preemptible_htrms_conversion`    | Integer<br>(Optional) |   `2`   |
+| `n_preemptible_pulsar_step1`        | Integer<br>(Optional) |   `1`   |
+| `n_preemptible_pulsar_step2`        | Integer<br>(Optional) |   `0`   |
+| `n_preemptible_pulsar_step3`        | Integer<br>(Optional) |   `1`   |
+| `n_preemptible_combine_archives`    | Integer<br>(Optional) |   `0`   |
+| `n_preemptible_dia_analysis`        | Integer<br>(Optional) |   `1`   |
+| `n_preemptible_combine_sne`         | Integer<br>(Optional) |   `0`   |
+| `n_preemptible_directDIA_single_vm` | Integer<br>(Optional) |   `0`   |
+
+## :bar_chart: Benchmarking
+
+The parallelized workflow has undergone rigorous validation using data acquired from both Thermo Fisher Orbitrap and Bruker timsTOF instrument platforms. Benchmarking against the legacy workflow, the parallelized workflow demonstrated exceptional consistency in both protein identification and quantification performance. 
+
+|                                                                                                                                                             ![id-comparison](assets/presentation_protein_groups_comparison.png)                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ![quant-correlation](assets/presentation_intensity_correlation.png)                                                                                                                                                                                                                                                                                                                          |
+| **Comparison of protein group identification and quantification between the legacy and parallelized workflows.** Processing a benchmark dataset of 10 standard Jurkat QC samples acquired on Thermo Fisher Orbitrap Astral and Bruker timsTOF HT mass spectrometers, respectively, the parallelized workflow demonstrates exceptional consistency in both identification and quantification. |
+
+## :wrench: Troubleshooting
+
+Before you start, run through this checklist before submitting your job — it covers the most common causes of failure:
+
+- [ ] All raw input files are in a **single GCS folder** (not nested in subfolders)
+- [ ] FASTA file is in standard `.fasta` or `.bgsfasta` format and is accessible from your Terra workspace
+- [ ] The `.prop` settings file was exported from the **same version** of Spectronaut supported by this workflow
+- [ ] `experiment_type` is entered exactly as `"proteome"` or `"ptm"` (all lowercase, no spaces)
+- [ ] If `do_pulsar = false`, at least one `spectral_library_*` input is provided
+- [ ] **"Use call caching"** is checked in the workflow configuration page
+- [ ] You are authenticated with the correct Broad Google account (`gcloud auth login`)
+
+**I got an error about insufficient disk space.**
+Increase the `disk_size_multiplier` input (e.g., from `3` to `4` or `5`). If the error was in the SNE combine step specifically, increase `sne_combine_disk_size_multiplier`.
+
+**I got a permission error when uploading files — "You do not have access to this bucket".**
+Re-authenticate your machine with your Broad Google account using `gcloud auth login`. This is the most common cause: another user previously signed in on the same computer, and their credentials are being used instead of yours. See the [authentication section](#step-3-authenticate-with-your-google-account) above for details.
+
+**I'm not sure how many VMs to use.**
+A reasonable starting point is one VM per 20–30 files. For 200 files, `num_vms = 8` or `num_vms = 10` works well. The workflow will not create more VMs than you have files — if you request 20 VMs for 15 files, it will automatically scale down to 15 VMs.
+
+**I set `do_pulsar = false` but my job failed immediately with an error about spectral libraries.**
+When `do_pulsar = false`, you must provide at least one spectral library via `spectral_library_1` (and optionally `spectral_library_2`, `spectral_library_3`). The workflow validates this at startup and exits early if no library is supplied.
+
+## :file_folder: Useful Resources
+
+- [Spectronaut Manual](https://biognosys.com/resources/spectronaut-manual/)
+- [Running Spectronaut on a Public Dataset in a Distributed Manner (Spectronaut v20.3+)](doc/20251203_Distributed_Processing_Spectronaut_20_v2.0.pdf)
+
+## :phone: Contacts
+
+- **Cameron Lian** (<glian@broadinstitute.org>)
+  Research Associate I, Proteomics Platform
+- **‌Natalie Clark** (<nclark@broadinstitute.org>)
+  Senior Computational Scientist I, Proteomics Platform
+- **DR Mani** (<manidr@broadinstitute.org>)
+  Director, Computational Proteomics
+
+## :tada: Credits 
+
+- **Moe Haines**
+  Research Scientist I, Proteomics Platform

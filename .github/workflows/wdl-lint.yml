@@ -1,0 +1,65 @@
+name: WDL Lint and Format
+
+on:
+  push:
+    paths:
+      - '**.wdl'
+  pull_request:
+    paths:
+      - '**.wdl'
+
+jobs:
+  miniwdl-check:
+    name: miniwdl lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install miniwdl
+        run: pip install miniwdl
+
+      - name: Run miniwdl check on all WDL files
+        run: |
+          find . -name '*.wdl' | while read wdl; do
+            echo "Checking: $wdl"
+            miniwdl check "$wdl"
+          done
+
+  dos2unix:
+    name: dos2unix conversion
+    runs-on: ubuntu-latest
+    # Only run on push to convert and commit; skip on PRs to avoid write permission issues
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dos2unix
+        run: sudo apt-get install -y dos2unix
+
+      - name: Convert WDL files to Unix line endings
+        run: |
+          find . -name '*.wdl' -exec dos2unix {} \;
+
+      - name: Commit line ending fixes if any
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add '*.wdl'
+            git commit -m "style: convert WDL files to Unix line endings"
+            git push
+          else
+            echo "No line ending changes needed."
+          fi
