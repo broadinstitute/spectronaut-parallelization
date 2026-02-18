@@ -60,6 +60,7 @@ workflow parallel_spectronaut {
         # Disk Sizing Configuration
         # ============================================================================
         Float disk_size_multiplier = 3  # Multiplier for disk size calculation (default: 3)
+        Float sne_combine_disk_size_multiplier = 5  # Separate disk size multiplier for SNE combine step (default: 5)
         Float average_file_size_gb = 15  # Average file size in GB for disk allocation (default: 15)
         Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
@@ -84,9 +85,10 @@ workflow parallel_spectronaut {
         "proteome": 64,
         "ptm": 64,
     }
-    Map[String, Int] pulsar_step1_ram_gb_presets = {
-        "proteome": 64,
-        "ptm": 96,
+    # Base RAM per file in bin (GB/file) for dynamic scaling
+    Map[String, Int] pulsar_step1_base_ram_per_file_presets = {
+        "proteome": 15,
+        "ptm": 20,
     }
 
     # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
@@ -94,9 +96,10 @@ workflow parallel_spectronaut {
         "proteome": 32,
         "ptm": 48,
     }
-    Map[String, Int] pulsar_step2_ram_gb_presets = {
-        "proteome": 64,
-        "ptm": 128,
+    # Base RAM per total file (GB/file) for dynamic scaling
+    Map[String, Float] pulsar_step2_base_ram_per_file_presets = {
+        "proteome": 0.5,
+        "ptm": 1.0,
     }
 
     # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
@@ -104,9 +107,10 @@ workflow parallel_spectronaut {
         "proteome": 64,
         "ptm": 128,
     }
-    Map[String, Int] pulsar_step3_ram_gb_presets = {
-        "proteome": 64,
-        "ptm": 96,
+    # Base RAM per file in bin (GB/file) for dynamic scaling
+    Map[String, Int] pulsar_step3_base_ram_per_file_presets = {
+        "proteome": 15,
+        "ptm": 20,
     }
 
     # Combine final archives into .kit library
@@ -114,9 +118,10 @@ workflow parallel_spectronaut {
         "proteome": 32,
         "ptm": 48,
     }
-    Map[String, Int] combine_archives_ram_gb_presets = {
-        "proteome": 64,
-        "ptm": 128,
+    # Base RAM per total file (GB/file) for dynamic scaling
+    Map[String, Float] combine_archives_base_ram_per_file_presets = {
+        "proteome": 0.5,
+        "ptm": 1.0,
     }
 
     # DirectDIA single VM (does both search and analysis in one step)
@@ -134,18 +139,20 @@ workflow parallel_spectronaut {
         "proteome": 64,
         "ptm": 64,
     }
-    Map[String, Int] dia_analysis_ram_gb_presets = {
-        "proteome": 64,
-        "ptm": 96,
+    # Base RAM per file in bin (GB/file) for dynamic scaling
+    Map[String, Int] dia_analysis_base_ram_per_file_presets = {
+        "proteome": 10,
+        "ptm": 15,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
         "proteome": 32,
         "ptm": 32,
     }
-    Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 96,
-        "ptm": 128,
+    # Base RAM per total file (GB/file) for dynamic scaling
+    Map[String, Float] combine_sne_base_ram_per_file_presets = {
+        "proteome": 0.8,
+        "ptm": 1.2,
     }
 
     # Validate experiment_type and fallback to "proteome" if invalid
@@ -154,17 +161,16 @@ workflow parallel_spectronaut {
 
     # Look up values based on validated_experiment_type
     Int pulsar_step1_cpu = pulsar_step1_cpu_presets[validated_experiment_type]
-    Int pulsar_step1_ram_gb = pulsar_step1_ram_gb_presets[validated_experiment_type]
+    Int pulsar_step1_base_ram_per_file = pulsar_step1_base_ram_per_file_presets[validated_experiment_type]
 
     Int pulsar_step2_cpu = pulsar_step2_cpu_presets[validated_experiment_type]
-    Int pulsar_step2_ram_gb = pulsar_step2_ram_gb_presets[validated_experiment_type]
+    Float pulsar_step2_base_ram_per_file = pulsar_step2_base_ram_per_file_presets[validated_experiment_type]
 
     Int pulsar_step3_cpu = pulsar_step3_cpu_presets[validated_experiment_type]
-    Int pulsar_step3_ram_gb = pulsar_step3_ram_gb_presets[validated_experiment_type]
+    Int pulsar_step3_base_ram_per_file = pulsar_step3_base_ram_per_file_presets[validated_experiment_type]
 
     Int combine_archives_cpu = combine_archives_cpu_presets[validated_experiment_type]
-    Int combine_archives_ram_gb = combine_archives_ram_gb_presets[
-        validated_experiment_type]
+    Float combine_archives_base_ram_per_file = combine_archives_base_ram_per_file_presets[validated_experiment_type]
 
     Int directDIA_single_vm_cpu = directDIA_single_vm_cpu_presets[
         validated_experiment_type]
@@ -172,10 +178,10 @@ workflow parallel_spectronaut {
         validated_experiment_type]
 
     Int dia_analysis_cpu = dia_analysis_cpu_presets[validated_experiment_type]
-    Int dia_analysis_ram_gb = dia_analysis_ram_gb_presets[validated_experiment_type]
+    Int dia_analysis_base_ram_per_file = dia_analysis_base_ram_per_file_presets[validated_experiment_type]
 
     Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
-    Int combine_sne_ram_gb = combine_sne_ram_gb_presets[validated_experiment_type]
+    Float combine_sne_base_ram_per_file = combine_sne_base_ram_per_file_presets[validated_experiment_type]
 
     # ============================================================================
     # PHASE I: Discovery
@@ -224,6 +230,19 @@ workflow parallel_spectronaut {
         sum_floats.total_size,
         total_input_size_gb,
     ])
+
+    # Compute non-parallelized task RAM based on total file count (capped at 896 GB)
+    Int pulsar_step2_ram_gb = if (ceil(pulsar_step2_base_ram_per_file * list_files.num_files) > 896)
+        then 896
+        else ceil(pulsar_step2_base_ram_per_file * list_files.num_files)
+
+    Int combine_archives_ram_gb = if (ceil(combine_archives_base_ram_per_file * list_files.num_files) > 896)
+        then 896
+        else ceil(combine_archives_base_ram_per_file * list_files.num_files)
+
+    Int combine_sne_ram_gb = if (ceil(combine_sne_base_ram_per_file * list_files.num_files) > 896)
+        then 896
+        else ceil(combine_sne_base_ram_per_file * list_files.num_files)
 
     # ============================================================================
     # PHASE III: Conditional Execution - Single VM vs Parallel
@@ -296,7 +315,8 @@ workflow parallel_spectronaut {
                 enzyme_database = enzyme_database,
                 do_conversion = do_conversion,
                 cpu = pulsar_step1_cpu,
-                ram_gb = pulsar_step1_ram_gb,
+                base_ram_per_file = pulsar_step1_base_ram_per_file,
+                num_files_in_bin = length(search_file_bins[i]),
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step1,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
@@ -334,10 +354,10 @@ workflow parallel_spectronaut {
                 enzyme_database = enzyme_database,
                 do_conversion = do_conversion,
                 cpu = pulsar_step3_cpu,
-                ram_gb = pulsar_step3_ram_gb,
+                base_ram_per_file = pulsar_step3_base_ram_per_file,
+                num_files_in_bin = length(search_file_bins[i]),
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step3,
-
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
         }
@@ -370,9 +390,9 @@ workflow parallel_spectronaut {
                 analysis_schema = directDIA_settings,
                 enzyme_database = enzyme_database,
                 cpu = dia_analysis_cpu,
-                ram_gb = dia_analysis_ram_gb,
+                base_ram_per_file = dia_analysis_base_ram_per_file,
+                num_files_in_bin = length(search_file_bins[i]),
                 bin_index = i,
-
                 n_preemptible = n_preemptible_dia_analysis,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
             }
@@ -394,10 +414,9 @@ workflow parallel_spectronaut {
             report_schema_4 = report_schema_4,
             cpu = combine_sne_cpu,
             ram_gb = combine_sne_ram_gb,
-
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
-            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
+            allocated_disk_gb = ceil(finalized_total_size_gb * sne_combine_disk_size_multiplier),
         }
     }
 
@@ -828,7 +847,8 @@ task pulsar_step1_binned {
         Array[String] input_files
         Boolean do_conversion
         Int cpu
-        Int ram_gb
+        Int base_ram_per_file
+        Int num_files_in_bin
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
@@ -836,6 +856,8 @@ task pulsar_step1_binned {
         File? fasta_3
         File? enzyme_database
     }
+
+    Int ram_gb = if (base_ram_per_file * num_files_in_bin > 896) then 896 else base_ram_per_file * num_files_in_bin
 
     command <<<
         set -euo pipefail
@@ -1255,12 +1277,15 @@ task pulsar_step3_binned {
         String experiment_name
         Boolean do_conversion
         Int cpu
-        Int ram_gb
+        Int base_ram_per_file
+        Int num_files_in_bin
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
     }
+
+    Int ram_gb = if (base_ram_per_file * num_files_in_bin > 896) then 896 else base_ram_per_file * num_files_in_bin
 
     command <<<
         set -euo pipefail
@@ -1660,12 +1685,15 @@ task dia_analysis_binned {
         Array[String] input_files
         String experiment_name
         Int cpu
-        Int ram_gb
+        Int base_ram_per_file
+        Int num_files_in_bin
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
     }
+
+    Int ram_gb = if (base_ram_per_file * num_files_in_bin > 896) then 896 else base_ram_per_file * num_files_in_bin
 
     command <<<
         set -euo pipefail
