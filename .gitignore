@@ -2,3 +2,5 @@ tests/
 .DS_Store
 
 .venv/
+
+firebase-debug.log
