@@ -85,10 +85,10 @@ workflow parallel_spectronaut {
         "proteome": 64,
         "ptm": 64,
     }
-    # Base RAM per file in bin (GB/file) for dynamic scaling
-    Map[String, Int] pulsar_step1_base_ram_per_file_presets = {
-        "proteome": 15,
-        "ptm": 20,
+    # Absolute RAM allocation (GB)
+    Map[String, Int] pulsar_step1_ram_gb_presets = {
+        "proteome": 150,
+        "ptm": 200,
     }
 
     # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
@@ -107,10 +107,10 @@ workflow parallel_spectronaut {
         "proteome": 64,
         "ptm": 128,
     }
-    # Base RAM per file in bin (GB/file) for dynamic scaling
-    Map[String, Int] pulsar_step3_base_ram_per_file_presets = {
-        "proteome": 15,
-        "ptm": 20,
+    # Absolute RAM allocation (GB)
+    Map[String, Int] pulsar_step3_ram_gb_presets = {
+        "proteome": 150,
+        "ptm": 200,
     }
 
     # Combine final archives into .kit library
@@ -139,10 +139,10 @@ workflow parallel_spectronaut {
         "proteome": 64,
         "ptm": 64,
     }
-    # Base RAM per file in bin (GB/file) for dynamic scaling
-    Map[String, Int] dia_analysis_base_ram_per_file_presets = {
-        "proteome": 10,
-        "ptm": 15,
+    # Absolute RAM allocation (GB)
+    Map[String, Int] dia_analysis_ram_gb_presets = {
+        "proteome": 150,
+        "ptm": 200,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
@@ -161,13 +161,13 @@ workflow parallel_spectronaut {
 
     # Look up values based on validated_experiment_type
     Int pulsar_step1_cpu = pulsar_step1_cpu_presets[validated_experiment_type]
-    Int pulsar_step1_base_ram_per_file = pulsar_step1_base_ram_per_file_presets[validated_experiment_type]
+    Int pulsar_step1_ram_gb = pulsar_step1_ram_gb_presets[validated_experiment_type]
 
     Int pulsar_step2_cpu = pulsar_step2_cpu_presets[validated_experiment_type]
     Float pulsar_step2_base_ram_per_file = pulsar_step2_base_ram_per_file_presets[validated_experiment_type]
 
     Int pulsar_step3_cpu = pulsar_step3_cpu_presets[validated_experiment_type]
-    Int pulsar_step3_base_ram_per_file = pulsar_step3_base_ram_per_file_presets[validated_experiment_type]
+    Int pulsar_step3_ram_gb = pulsar_step3_ram_gb_presets[validated_experiment_type]
 
     Int combine_archives_cpu = combine_archives_cpu_presets[validated_experiment_type]
     Float combine_archives_base_ram_per_file = combine_archives_base_ram_per_file_presets[validated_experiment_type]
@@ -178,7 +178,7 @@ workflow parallel_spectronaut {
         validated_experiment_type]
 
     Int dia_analysis_cpu = dia_analysis_cpu_presets[validated_experiment_type]
-    Int dia_analysis_base_ram_per_file = dia_analysis_base_ram_per_file_presets[validated_experiment_type]
+    Int dia_analysis_ram_gb = dia_analysis_ram_gb_presets[validated_experiment_type]
 
     Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
     Float combine_sne_base_ram_per_file = combine_sne_base_ram_per_file_presets[validated_experiment_type]
@@ -315,8 +315,7 @@ workflow parallel_spectronaut {
                 enzyme_database = enzyme_database,
                 do_conversion = do_conversion,
                 cpu = pulsar_step1_cpu,
-                base_ram_per_file = pulsar_step1_base_ram_per_file,
-                num_files_in_bin = length(search_file_bins[i]),
+                ram_gb = pulsar_step1_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step1,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
@@ -354,8 +353,7 @@ workflow parallel_spectronaut {
                 enzyme_database = enzyme_database,
                 do_conversion = do_conversion,
                 cpu = pulsar_step3_cpu,
-                base_ram_per_file = pulsar_step3_base_ram_per_file,
-                num_files_in_bin = length(search_file_bins[i]),
+                ram_gb = pulsar_step3_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_pulsar_step3,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
@@ -390,8 +388,7 @@ workflow parallel_spectronaut {
                 analysis_schema = directDIA_settings,
                 enzyme_database = enzyme_database,
                 cpu = dia_analysis_cpu,
-                base_ram_per_file = dia_analysis_base_ram_per_file,
-                num_files_in_bin = length(search_file_bins[i]),
+                ram_gb = dia_analysis_ram_gb,
                 bin_index = i,
                 n_preemptible = n_preemptible_dia_analysis,
                 allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
@@ -664,6 +661,9 @@ task directDIA_single_vm {
             cpu_start_ns=0
         fi
 
+        # Capture per-CPU stats from /proc/stat
+        cpu_stat_start=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
 
@@ -749,6 +749,8 @@ task directDIA_single_vm {
             cpu_end_ns=0
         fi
 
+        cpu_stat_end=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
             cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
             cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
@@ -759,6 +761,21 @@ task directDIA_single_vm {
 
             echo "Allocated CPUs: ${allocated_cpus}"
             echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+
+            if [ -n "$cpu_stat_start" ] && [ -n "$cpu_stat_end" ]; then
+                max_core_util=$(paste \
+                    <(echo "$cpu_stat_start" | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    <(echo "$cpu_stat_end"   | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    | awk '{
+                        idle_start=$1; total_start=$2; idle_end=$3; total_end=$4;
+                        d_total = total_end - total_start;
+                        d_idle  = idle_end  - idle_start;
+                        if (d_total > 0) util = (1 - d_idle/d_total) * 100; else util = 0;
+                        if (util > max) max = util;
+                      } END { printf "%.2f", max }')
+                echo "Max Per-Core CPU Utilization: ${max_core_util}%"
+            fi
+
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -847,8 +864,7 @@ task pulsar_step1_binned {
         Array[String] input_files
         Boolean do_conversion
         Int cpu
-        Int base_ram_per_file
-        Int num_files_in_bin
+        Int ram_gb
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
@@ -856,8 +872,6 @@ task pulsar_step1_binned {
         File? fasta_3
         File? enzyme_database
     }
-
-    Int ram_gb = if (base_ram_per_file * num_files_in_bin > 896) then 896 else base_ram_per_file * num_files_in_bin
 
     command <<<
         set -euo pipefail
@@ -877,6 +891,9 @@ task pulsar_step1_binned {
         else
             cpu_start_ns=0
         fi
+
+        # Capture per-CPU stats from /proc/stat
+        cpu_stat_start=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
 
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
@@ -983,6 +1000,8 @@ task pulsar_step1_binned {
             cpu_end_ns=0
         fi
 
+        cpu_stat_end=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
             cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
             cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
@@ -993,6 +1012,21 @@ task pulsar_step1_binned {
 
             echo "Allocated CPUs: ${allocated_cpus}"
             echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+
+            if [ -n "$cpu_stat_start" ] && [ -n "$cpu_stat_end" ]; then
+                max_core_util=$(paste \
+                    <(echo "$cpu_stat_start" | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    <(echo "$cpu_stat_end"   | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    | awk '{
+                        idle_start=$1; total_start=$2; idle_end=$3; total_end=$4;
+                        d_total = total_end - total_start;
+                        d_idle  = idle_end  - idle_start;
+                        if (d_total > 0) util = (1 - d_idle/d_total) * 100; else util = 0;
+                        if (util > max) max = util;
+                      } END { printf "%.2f", max }')
+                echo "Max Per-Core CPU Utilization: ${max_core_util}%"
+            fi
+
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1105,6 +1139,9 @@ task pulsar_step2_combine_models {
             cpu_start_ns=0
         fi
 
+        # Capture per-CPU stats from /proc/stat
+        cpu_stat_start=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         archives_dir="${cromwell_root}/work_archives_step1"
         output_dir="${cromwell_root}/out_pulsar_step2"
         tmp_dir="${cromwell_root}/sn_temp"
@@ -1177,6 +1214,8 @@ task pulsar_step2_combine_models {
             cpu_end_ns=0
         fi
 
+        cpu_stat_end=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
             cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
             cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
@@ -1187,6 +1226,21 @@ task pulsar_step2_combine_models {
 
             echo "Allocated CPUs: ${allocated_cpus}"
             echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+
+            if [ -n "$cpu_stat_start" ] && [ -n "$cpu_stat_end" ]; then
+                max_core_util=$(paste \
+                    <(echo "$cpu_stat_start" | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    <(echo "$cpu_stat_end"   | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    | awk '{
+                        idle_start=$1; total_start=$2; idle_end=$3; total_end=$4;
+                        d_total = total_end - total_start;
+                        d_idle  = idle_end  - idle_start;
+                        if (d_total > 0) util = (1 - d_idle/d_total) * 100; else util = 0;
+                        if (util > max) max = util;
+                      } END { printf "%.2f", max }')
+                echo "Max Per-Core CPU Utilization: ${max_core_util}%"
+            fi
+
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1277,15 +1331,12 @@ task pulsar_step3_binned {
         String experiment_name
         Boolean do_conversion
         Int cpu
-        Int base_ram_per_file
-        Int num_files_in_bin
+        Int ram_gb
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
     }
-
-    Int ram_gb = if (base_ram_per_file * num_files_in_bin > 896) then 896 else base_ram_per_file * num_files_in_bin
 
     command <<<
         set -euo pipefail
@@ -1305,6 +1356,9 @@ task pulsar_step3_binned {
         else
             cpu_start_ns=0
         fi
+
+        # Capture per-CPU stats from /proc/stat
+        cpu_stat_start=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
 
         input_dir="${cromwell_root}/work_input"
         output_dir="${cromwell_root}/out_pulsar_step3"
@@ -1407,6 +1461,8 @@ task pulsar_step3_binned {
             cpu_end_ns=0
         fi
 
+        cpu_stat_end=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
             cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
             cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
@@ -1417,6 +1473,21 @@ task pulsar_step3_binned {
 
             echo "Allocated CPUs: ${allocated_cpus}"
             echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+
+            if [ -n "$cpu_stat_start" ] && [ -n "$cpu_stat_end" ]; then
+                max_core_util=$(paste \
+                    <(echo "$cpu_stat_start" | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    <(echo "$cpu_stat_end"   | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    | awk '{
+                        idle_start=$1; total_start=$2; idle_end=$3; total_end=$4;
+                        d_total = total_end - total_start;
+                        d_idle  = idle_end  - idle_start;
+                        if (d_total > 0) util = (1 - d_idle/d_total) * 100; else util = 0;
+                        if (util > max) max = util;
+                      } END { printf "%.2f", max }')
+                echo "Max Per-Core CPU Utilization: ${max_core_util}%"
+            fi
+
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1528,6 +1599,9 @@ task combine_final_archives {
             cpu_start_ns=0
         fi
 
+        # Capture per-CPU stats from /proc/stat
+        cpu_stat_start=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         merged_library="merged_library.kit"
 
         work_archives="${cromwell_root}/work_archives"
@@ -1587,6 +1661,8 @@ task combine_final_archives {
             cpu_end_ns=0
         fi
 
+        cpu_stat_end=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
             cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
             cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
@@ -1597,6 +1673,21 @@ task combine_final_archives {
 
             echo "Allocated CPUs: ${allocated_cpus}"
             echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+
+            if [ -n "$cpu_stat_start" ] && [ -n "$cpu_stat_end" ]; then
+                max_core_util=$(paste \
+                    <(echo "$cpu_stat_start" | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    <(echo "$cpu_stat_end"   | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    | awk '{
+                        idle_start=$1; total_start=$2; idle_end=$3; total_end=$4;
+                        d_total = total_end - total_start;
+                        d_idle  = idle_end  - idle_start;
+                        if (d_total > 0) util = (1 - d_idle/d_total) * 100; else util = 0;
+                        if (util > max) max = util;
+                      } END { printf "%.2f", max }')
+                echo "Max Per-Core CPU Utilization: ${max_core_util}%"
+            fi
+
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1685,15 +1776,12 @@ task dia_analysis_binned {
         Array[String] input_files
         String experiment_name
         Int cpu
-        Int base_ram_per_file
-        Int num_files_in_bin
+        Int ram_gb
         Int bin_index
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
     }
-
-    Int ram_gb = if (base_ram_per_file * num_files_in_bin > 896) then 896 else base_ram_per_file * num_files_in_bin
 
     command <<<
         set -euo pipefail
@@ -1713,6 +1801,9 @@ task dia_analysis_binned {
         else
             cpu_start_ns=0
         fi
+
+        # Capture per-CPU stats from /proc/stat
+        cpu_stat_start=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
 
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
@@ -1791,6 +1882,8 @@ task dia_analysis_binned {
             cpu_end_ns=0
         fi
 
+        cpu_stat_end=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
             cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
             cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
@@ -1801,6 +1894,21 @@ task dia_analysis_binned {
 
             echo "Allocated CPUs: ${allocated_cpus}"
             echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+
+            if [ -n "$cpu_stat_start" ] && [ -n "$cpu_stat_end" ]; then
+                max_core_util=$(paste \
+                    <(echo "$cpu_stat_start" | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    <(echo "$cpu_stat_end"   | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    | awk '{
+                        idle_start=$1; total_start=$2; idle_end=$3; total_end=$4;
+                        d_total = total_end - total_start;
+                        d_idle  = idle_end  - idle_start;
+                        if (d_total > 0) util = (1 - d_idle/d_total) * 100; else util = 0;
+                        if (util > max) max = util;
+                      } END { printf "%.2f", max }')
+                echo "Max Per-Core CPU Utilization: ${max_core_util}%"
+            fi
+
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
@@ -1918,6 +2026,9 @@ task combine_sne {
             cpu_start_ns=0
         fi
 
+        # Capture per-CPU stats from /proc/stat
+        cpu_stat_start=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         output_dir="${cromwell_root}/out_combine"
         output_zip="${cromwell_root}/spectronaut_output.zip"
 
@@ -1985,6 +2096,8 @@ task combine_sne {
             cpu_end_ns=0
         fi
 
+        cpu_stat_end=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+
         if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
             cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
             cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
@@ -1995,6 +2108,21 @@ task combine_sne {
 
             echo "Allocated CPUs: ${allocated_cpus}"
             echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
+
+            if [ -n "$cpu_stat_start" ] && [ -n "$cpu_stat_end" ]; then
+                max_core_util=$(paste \
+                    <(echo "$cpu_stat_start" | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    <(echo "$cpu_stat_end"   | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
+                    | awk '{
+                        idle_start=$1; total_start=$2; idle_end=$3; total_end=$4;
+                        d_total = total_end - total_start;
+                        d_idle  = idle_end  - idle_start;
+                        if (d_total > 0) util = (1 - d_idle/d_total) * 100; else util = 0;
+                        if (util > max) max = util;
+                      } END { printf "%.2f", max }')
+                echo "Max Per-Core CPU Utilization: ${max_core_util}%"
+            fi
+
             echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
             echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
         else
