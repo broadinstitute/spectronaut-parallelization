@@ -60,8 +60,8 @@ workflow parallel_spectronaut {
         # Disk Sizing Configuration
         # ============================================================================
         Float disk_size_multiplier = 3  # Multiplier for disk size calculation (default: 3)
-        Float sne_combine_disk_size_multiplier = 5  # Separate disk size multiplier for SNE combine step (default: 5)
-        Float average_file_size_gb = 15  # Average file size in GB for disk allocation (default: 15)
+        Float sne_combine_disk_size_multiplier = 6  # Separate disk size multiplier for SNE combine step (default: 6)
+        Float average_file_size_gb = 20  # Average file size in GB for disk allocation (default: 20)
         Int num_vms = 1  # Number of VMs for parallel processing (1 = single VM, >1 = parallel)
 
         # ============================================================================
@@ -98,8 +98,8 @@ workflow parallel_spectronaut {
     }
     # Base RAM per total file (GB/file) for dynamic scaling
     Map[String, Float] pulsar_step2_base_ram_per_file_presets = {
-        "proteome": 0.5,
-        "ptm": 1.0,
+        "proteome": 0.8,
+        "ptm": 1.2,
     }
 
     # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
@@ -120,8 +120,8 @@ workflow parallel_spectronaut {
     }
     # Base RAM per total file (GB/file) for dynamic scaling
     Map[String, Float] combine_archives_base_ram_per_file_presets = {
-        "proteome": 0.5,
-        "ptm": 1.0,
+        "proteome": 1.2,
+        "ptm": 1.8,
     }
 
     # DirectDIA single VM (does both search and analysis in one step)
@@ -151,8 +151,8 @@ workflow parallel_spectronaut {
     }
     # Base RAM per total file (GB/file) for dynamic scaling
     Map[String, Float] combine_sne_base_ram_per_file_presets = {
-        "proteome": 0.8,
-        "ptm": 1.2,
+        "proteome": 1.2,
+        "ptm": 1.8,
     }
 
     # Validate experiment_type and fallback to "proteome" if invalid
