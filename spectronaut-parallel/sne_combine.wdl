@@ -3,13 +3,10 @@ version 1.0
 workflow sne_combine {
     input {
         # Required
-        String sne_gcs_path
+        String sne_directory
         String experiment_name
         File analysis_schema
         Int n_data_files
-
-        # experiment_type preset system
-        String experiment_type = "proteome"   # "proteome" or "ptm"
 
         # Mode toggle
         Boolean produce_final_sne = true
@@ -26,32 +23,25 @@ workflow sne_combine {
         File? enzyme_database
     }
 
-    Map[String, Int] combine_sne_cpu_presets = {
-        "proteome": 32,
-        "ptm": 32,
-    }
+    Int combine_sne_cpu = 32
 
     # RAM per data file (GB)
-    Float ram_per_file_final   = 1.0   # produce_final_sne = true
-    Float ram_per_file_combine = 0.5   # produce_final_sne = false
+    Float ram_per_file_produceTRUE  = 1.5   # produce_final_sne = true
+    Float ram_per_file_produceFALSE = 1.0   # produce_final_sne = false
 
     # Disk per data file (GB)
-    Float disk_per_file_final   = 5.0   # produce_final_sne = true
-    Float disk_per_file_combine = 3.0   # produce_final_sne = false
+    Float disk_per_file_produceTRUE  = 7.0   # produce_final_sne = true
+    Float disk_per_file_produceFALSE = 3.0   # produce_final_sne = false
 
-    String validated_experiment_type = if (experiment_type == "proteome" || experiment_type == "ptm") then experiment_type else "proteome"
-
-    Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
-
-    Float ram_per_file  = if produce_final_sne then ram_per_file_final  else ram_per_file_combine
-    Float disk_per_file = if produce_final_sne then disk_per_file_final else disk_per_file_combine
+    Float ram_per_file  = if produce_final_sne then ram_per_file_produceTRUE  else ram_per_file_produceFALSE
+    Float disk_per_file = if produce_final_sne then disk_per_file_produceTRUE else disk_per_file_produceFALSE
 
     Int combine_sne_ram_gb = ceil(ram_per_file  * n_data_files)
     Int allocated_disk_gb  = ceil(disk_per_file * n_data_files)
 
     call combine_sne {
         input:
-            sne_gcs_path = sne_gcs_path,
+            sne_directory = sne_directory,
             experiment_name = experiment_name,
             analysis_schema = analysis_schema,
             produce_final_sne = produce_final_sne,
@@ -74,7 +64,7 @@ workflow sne_combine {
 
 task combine_sne {
     input {
-        String sne_gcs_path
+        String sne_directory
         File analysis_schema
         String experiment_name
         Boolean produce_final_sne
@@ -120,13 +110,13 @@ task combine_sne {
         sne_dir="${cromwell_root}/work_snes"
         mkdir -p "${sne_dir}"
 
-        echo "Copying SNE files recursively from ~{sne_gcs_path} ..."
-        gcloud storage cp -r "~{sne_gcs_path}/**.sne" "${sne_dir}/"
+        echo "Copying SNE files recursively from ~{sne_directory} ..."
+        gcloud storage cp -r "~{sne_directory}/**.sne" "${sne_dir}/"
 
         sne_count=$(find "${sne_dir}" -name "*.sne" | wc -l)
         echo "Found ${sne_count} .sne file(s)."
         if [ "${sne_count}" -eq 0 ]; then
-            echo "ERROR: No .sne files found under ~{sne_gcs_path}" >&2
+            echo "ERROR: No .sne files found under ~{sne_directory}" >&2
             exit 1
         fi
 
