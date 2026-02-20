@@ -6,13 +6,13 @@ workflow sne_combine {
         String sne_gcs_path
         String experiment_name
         File analysis_schema
+        Int n_data_files
 
         # experiment_type preset system
         String experiment_type = "proteome"   # "proteome" or "ptm"
 
-        # Disk sizing
-        Float disk_size_gb = 500
-        Float sne_combine_disk_size_multiplier = 1
+        # Mode toggle
+        Boolean produce_final_sne = true
 
         # Preemptible
         Int n_preemptible_combine_sne = 0
@@ -30,23 +30,31 @@ workflow sne_combine {
         "proteome": 32,
         "ptm": 32,
     }
-    Map[String, Int] combine_sne_ram_gb_presets = {
-        "proteome": 384,
-        "ptm": 640,
-    }
+
+    # RAM per data file (GB)
+    Float ram_per_file_final   = 1.0   # produce_final_sne = true
+    Float ram_per_file_combine = 0.5   # produce_final_sne = false
+
+    # Disk per data file (GB)
+    Float disk_per_file_final   = 5.0   # produce_final_sne = true
+    Float disk_per_file_combine = 3.0   # produce_final_sne = false
 
     String validated_experiment_type = if (experiment_type == "proteome" || experiment_type == "ptm") then experiment_type else "proteome"
 
     Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
-    Int combine_sne_ram_gb = combine_sne_ram_gb_presets[validated_experiment_type]
 
-    Int allocated_disk_gb = ceil(disk_size_gb * sne_combine_disk_size_multiplier)
+    Float ram_per_file  = if produce_final_sne then ram_per_file_final  else ram_per_file_combine
+    Float disk_per_file = if produce_final_sne then disk_per_file_final else disk_per_file_combine
+
+    Int combine_sne_ram_gb = ceil(ram_per_file  * n_data_files)
+    Int allocated_disk_gb  = ceil(disk_per_file * n_data_files)
 
     call combine_sne {
         input:
             sne_gcs_path = sne_gcs_path,
             experiment_name = experiment_name,
             analysis_schema = analysis_schema,
+            produce_final_sne = produce_final_sne,
             ram_gb = combine_sne_ram_gb,
             cpu = combine_sne_cpu,
             allocated_disk_gb = allocated_disk_gb,
@@ -69,6 +77,7 @@ task combine_sne {
         String sne_gcs_path
         File analysis_schema
         String experiment_name
+        Boolean produce_final_sne
         Int ram_gb
         Int cpu
         Int allocated_disk_gb
@@ -127,16 +136,29 @@ task combine_sne {
             dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        spectronaut manageSNE --merge \
-            -n "~{experiment_name}" \
-            -o "${output_dir}" \
-            -d "${sne_dir}" \
-            ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
-            -s "~{analysis_schema}" \
-            ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
-            ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
-            ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
-            ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+        if [ "~{produce_final_sne}" = "true" ]; then
+            spectronaut manageSNE --merge \
+                -n "~{experiment_name}" \
+                -o "${output_dir}" \
+                -d "${sne_dir}" \
+                ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
+                -s "~{analysis_schema}" \
+                ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
+                ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
+                ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
+                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+        else
+            spectronaut combine \
+                -n "~{experiment_name}" \
+                -o "${output_dir}" \
+                -d "${sne_dir}" \
+                ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
+                -s "~{analysis_schema}" \
+                ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
+                ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
+                ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
+                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+        fi
 
         echo "Creating output archive..."
         zip -r "${output_zip}" "${output_dir}" -x \*.zip
