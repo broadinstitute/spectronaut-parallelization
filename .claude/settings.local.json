@@ -17,7 +17,11 @@
       "Bash(pip3 install:*)",
       "Bash(womtool validate:*)",
       "Bash(git -C /Users/cameronlian/Desktop/development/panoply-workflow-dev status)",
-      "Skill(commit-commands:commit)"
+      "Skill(commit-commands:commit)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "mcp__plugin_Notion_notion__notion-search",
+      "mcp__plugin_Notion_notion__notion-fetch"
     ],
     "deny": [],
     "ask": []

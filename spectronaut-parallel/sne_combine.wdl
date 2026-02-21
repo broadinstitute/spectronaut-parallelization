@@ -6,10 +6,12 @@ workflow sne_combine {
         String sne_directory
         String experiment_name
         File analysis_schema
-        Int n_data_files
 
         # Mode toggle
         Boolean produce_final_sne = true
+
+        # Disk size multiplier applied to total .sne file size (default: 50)
+        Float disk_size_multiplier = 50.0
 
         # Preemptible
         Int n_preemptible_combine_sne = 0
@@ -25,19 +27,20 @@ workflow sne_combine {
 
     Int combine_sne_cpu = 32
 
-    # RAM per data file (GB)
-    Float ram_per_file_produceTRUE  = 1.5   # produce_final_sne = true
-    Float ram_per_file_produceFALSE = 1.0   # produce_final_sne = false
+    call measure_sne_size {
+        input:
+            sne_directory = sne_directory,
+    }
 
-    # Disk per data file (GB)
-    Float disk_per_file_produceTRUE  = 7.0   # produce_final_sne = true
-    Float disk_per_file_produceFALSE = 3.0   # produce_final_sne = false
+    # RAM: scale with total SNE size (floor of 64 GB)
+    Float ram_per_gb_sne_produceTRUE  = 5.0
+    Float ram_per_gb_sne_produceFALSE = 3.0
+    Float ram_per_gb_sne = if produce_final_sne then ram_per_gb_sne_produceTRUE else ram_per_gb_sne_produceFALSE
+    Int combine_sne_ram_gb = if ceil(ram_per_gb_sne * measure_sne_size.total_sne_size_gb) > 64
+                             then ceil(ram_per_gb_sne * measure_sne_size.total_sne_size_gb)
+                             else 64
 
-    Float ram_per_file  = if produce_final_sne then ram_per_file_produceTRUE  else ram_per_file_produceFALSE
-    Float disk_per_file = if produce_final_sne then disk_per_file_produceTRUE else disk_per_file_produceFALSE
-
-    Int combine_sne_ram_gb = ceil(ram_per_file  * n_data_files)
-    Int allocated_disk_gb  = ceil(disk_per_file * n_data_files)
+    Int allocated_disk_gb = ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier)
 
     call combine_sne {
         input:
@@ -290,5 +293,43 @@ task combine_sne {
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "AMD Rome"
+    }
+}
+
+task measure_sne_size {
+    input {
+        String sne_directory
+    }
+
+    command <<<
+        set -euo pipefail
+
+        # Use gcloud storage ls -l with recursive glob to list all .sne files and their sizes
+        # The -l flag outputs: SIZE  DATE  gs://...
+        total_bytes=$(gcloud storage ls -l "~{sne_directory}/**.sne" 2>/dev/null \
+            | grep -v '^TOTAL:' \
+            | awk '{sum += $1} END {print (sum == "" ? 0 : sum)}')
+
+        if [ "${total_bytes}" -eq 0 ]; then
+            echo "ERROR: No .sne files found under ~{sne_directory}" >&2
+            exit 1
+        fi
+
+        total_gb=$(awk -v b="${total_bytes}" 'BEGIN { printf "%.4f", b / (1024^3) }')
+        echo "Total .sne size: ${total_gb} GB (${total_bytes} bytes)"
+        echo "${total_gb}" > total_sne_size_gb.txt
+    >>>
+
+    output {
+        Float total_sne_size_gb = read_float("total_sne_size_gb.txt")
+    }
+
+    runtime {
+        docker: "gcr.io/google.com/cloudsdktool/cloud-sdk:stable"
+        cpu: 2
+        memory: "8GB"
+        preemptible: 2
+        bootDiskSizeGb: 20
+        disks: "local-disk 50 HDD"
     }
 }
