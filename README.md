@@ -74,7 +74,7 @@ One of the important features of this workflow is built-in support for **preempt
 **What is a preemptible instance?**
 When Google Cloud runs a computation job, it can do so on two types of virtual machines:
 - **Standard instances** — reserved just for your job, always available, but more expensive.
-- **Preemptible instances** — run on spare computing capacity that Google has available at a given moment. They are **50–80% cheaper** than standard instances, but Google can "reclaim" them (i.e., shut them down) if that capacity is needed elsewhere. If that happens, your task simply retries automatically.
+- **Spot VMs** (formerly "Preemptible instances") — run on spare computing capacity that Google has available at a given moment. They are **60–91% cheaper** than standard instances, but Google can "reclaim" them (i.e., shut them down) if that capacity is needed elsewhere. If that happens, your task simply retries automatically. Note: legacy preemptible VMs had a 24-hour maximum runtime; Spot VMs do not have this limit.
 
 For long-running, embarrassingly parallel tasks like search archive generation — where losing one VM just means one bin retries — preemptible instances are an excellent way to reduce cost. The workflow is designed so that tasks most tolerant of interruption (Steps 1 and 3) default to using 1 preemptible attempt, while the non-interruptible combination steps default to non-preemptible.
 
@@ -301,7 +301,7 @@ If your raw files are on an instrument computer that you access remotely via Tea
 2. Click on `parallel_spectronaut`.
 3. You will see the workflow configuration page with three important options at the top:
    - **Snapshot version** — Always use the latest snapshot version for the most up-to-date features and bug fixes.
-   - **Use call caching** — This is very useful. When checked, Terra remembers the results of each task. If your job fails halfway and you resubmit, it will skip tasks that already completed successfully and resume from the failure point. **Check this box** unless you specifically want to re-run everything from scratch. Note: Terra detects changes via content checksums (MD5/CRC32C), not filenames — so if you upload a new version of a settings file, Terra will detect the change and re-run affected tasks even if the filename is the same. Conversely, uploading the same file to a different path will also miss the cache since the GCS URI is part of the cache key.
+   - **Use call caching** — This is very useful. When checked, Terra remembers the results of each task. If your job fails halfway and you resubmit, it will skip tasks that already completed successfully and resume from the failure point. **Check this box** unless you specifically want to re-run everything from scratch. Note: For `File`-typed inputs (e.g., `directDIA_settings`, `fasta_1`), Terra uses content checksums (MD5/CRC32C) as the cache key — not the filename or path. Uploading a new version of a settings file will trigger a re-run even if the filename is unchanged; uploading the same file to a new path will still hit the cache. For `String`-typed inputs (e.g., `file_directory`), the literal string value is the cache key, so changing the GCS path will break the cache even if the content is identical.
    - **Inputs** — This is where you fill in all the input variables.
 
 4. Fill in the required inputs at minimum:

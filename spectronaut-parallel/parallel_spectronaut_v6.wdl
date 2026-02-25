@@ -245,13 +245,13 @@ workflow parallel_spectronaut {
             then ceil(combine_archives_base_ram_per_file * list_files.num_files)
             else 128
 
-    Float combine_sne_ram_per_gb_true  = 5.0
-    Float combine_sne_ram_per_gb_false = 3.0
-    Float combine_sne_ram_per_gb = if generate_sne_large_experiment then combine_sne_ram_per_gb_true else combine_sne_ram_per_gb_false
-    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_gb * finalized_total_size_gb) > 750
+    Float combine_sne_ram_per_file_true  = 5.0
+    Float combine_sne_ram_per_file_false = 3.0
+    Float combine_sne_ram_per_file = if generate_sne_large_experiment then combine_sne_ram_per_file_true else combine_sne_ram_per_file_false
+    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_file * list_files.num_files) > 750
         then 750
-        else if ceil(combine_sne_ram_per_gb * finalized_total_size_gb) > 64
-            then ceil(combine_sne_ram_per_gb * finalized_total_size_gb)
+        else if ceil(combine_sne_ram_per_file * list_files.num_files) > 64
+            then ceil(combine_sne_ram_per_file * list_files.num_files)
             else 64
 
     # ============================================================================
