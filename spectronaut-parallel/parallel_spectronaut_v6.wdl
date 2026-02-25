@@ -77,6 +77,7 @@ workflow parallel_spectronaut {
         Int n_preemptible_dia_analysis = 1  # DIA analysis preemptible attempts
         Int n_preemptible_combine_sne = 0  # SNE combining preemptible attempts
         Int n_preemptible_htrms_conversion = 2  # Preemptible attempts for conversion
+        Boolean generate_sne_large_experiment = true  # If true, use manageSNE --merge; if false, use spectronaut combine
     }
 
     # Compute preset configurations based on experiment_type
@@ -231,18 +232,27 @@ workflow parallel_spectronaut {
         total_input_size_gb,
     ])
 
-    # Compute non-parallelized task RAM based on total file count (capped at 896 GB)
-    Int pulsar_step2_ram_gb = if (ceil(pulsar_step2_base_ram_per_file * list_files.num_files) > 896)
-        then 896
-        else ceil(pulsar_step2_base_ram_per_file * list_files.num_files)
+    # Compute non-parallelized task RAM based on total file count (floor of 128 GB, capped at 750 GB)
+    Int pulsar_step2_ram_gb = if (ceil(pulsar_step2_base_ram_per_file * list_files.num_files) > 750)
+        then 750
+        else if (ceil(pulsar_step2_base_ram_per_file * list_files.num_files) > 128)
+            then ceil(pulsar_step2_base_ram_per_file * list_files.num_files)
+            else 128
 
-    Int combine_archives_ram_gb = if (ceil(combine_archives_base_ram_per_file * list_files.num_files) > 896)
-        then 896
-        else ceil(combine_archives_base_ram_per_file * list_files.num_files)
+    Int combine_archives_ram_gb = if (ceil(combine_archives_base_ram_per_file * list_files.num_files) > 750)
+        then 750
+        else if (ceil(combine_archives_base_ram_per_file * list_files.num_files) > 128)
+            then ceil(combine_archives_base_ram_per_file * list_files.num_files)
+            else 128
 
-    Int combine_sne_ram_gb = if (ceil(combine_sne_base_ram_per_file * list_files.num_files) > 896)
-        then 896
-        else ceil(combine_sne_base_ram_per_file * list_files.num_files)
+    Float combine_sne_ram_per_gb_true  = 5.0
+    Float combine_sne_ram_per_gb_false = 3.0
+    Float combine_sne_ram_per_gb = if generate_sne_large_experiment then combine_sne_ram_per_gb_true else combine_sne_ram_per_gb_false
+    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_gb * finalized_total_size_gb) > 750
+        then 750
+        else if ceil(combine_sne_ram_per_gb * finalized_total_size_gb) > 64
+            then ceil(combine_sne_ram_per_gb * finalized_total_size_gb)
+            else 64
 
     # ============================================================================
     # PHASE III: Conditional Execution - Single VM vs Parallel
@@ -414,6 +424,7 @@ workflow parallel_spectronaut {
             enzyme_database = enzyme_database,
             n_preemptible = n_preemptible_combine_sne,
             allocated_disk_gb = ceil(finalized_total_size_gb * sne_combine_disk_size_multiplier),
+            generate_sne_large_experiment = generate_sne_large_experiment,
         }
     }
 
@@ -2005,6 +2016,7 @@ task combine_sne {
         File? report_schema_3
         File? report_schema_4
         File? enzyme_database
+        Boolean generate_sne_large_experiment
     }
 
     command <<<
@@ -2050,16 +2062,29 @@ task combine_sne {
             dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
         fi
 
-        spectronaut manageSNE --merge \
-            -n "~{experiment_name}" \
-            -o "${output_dir}" \
-            -d "${sne_dir}" \
-            ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
-            -s "~{analysis_schema}" \
-            ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
-            ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
-            ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
-            ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+        if [ "~{generate_sne_large_experiment}" = "true" ]; then
+            spectronaut manageSNE --merge \
+                -n "~{experiment_name}" \
+                -o "${output_dir}" \
+                -d "${sne_dir}" \
+                ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
+                -s "~{analysis_schema}" \
+                ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
+                ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
+                ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
+                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+        else
+            spectronaut combine \
+                -n "~{experiment_name}" \
+                -o "${output_dir}" \
+                -d "${sne_dir}" \
+                ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
+                -s "~{analysis_schema}" \
+                ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
+                ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
+                ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
+                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+        fi
 
         echo "Creating output archive..."
         zip -r "${output_zip}" "${output_dir}" -x \*.zip

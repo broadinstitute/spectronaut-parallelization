@@ -40,7 +40,9 @@ workflow sne_combine {
                              then ceil(ram_per_gb_sne * measure_sne_size.total_sne_size_gb)
                              else 64
 
-    Int allocated_disk_gb = ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier)
+    Int allocated_disk_gb = if ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier) > 50
+        then ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier)
+        else 50
 
     call combine_sne {
         input:

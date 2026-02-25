@@ -301,7 +301,7 @@ If your raw files are on an instrument computer that you access remotely via Tea
 2. Click on `parallel_spectronaut`.
 3. You will see the workflow configuration page with three important options at the top:
    - **Snapshot version** — Always use the latest snapshot version for the most up-to-date features and bug fixes.
-   - **Use call caching** — This is very useful. When checked, Terra remembers the results of each task. If your job fails halfway and you resubmit, it will skip tasks that already completed successfully and resume from the failure point. **Check this box** unless you specifically want to re-run everything from scratch (e.g., if you changed your search settings file but kept the exact same filename — Terra uses filenames to decide whether to reuse cached results).
+   - **Use call caching** — This is very useful. When checked, Terra remembers the results of each task. If your job fails halfway and you resubmit, it will skip tasks that already completed successfully and resume from the failure point. **Check this box** unless you specifically want to re-run everything from scratch. Note: Terra detects changes via content checksums (MD5/CRC32C), not filenames — so if you upload a new version of a settings file, Terra will detect the change and re-run affected tasks even if the filename is the same. Conversely, uploading the same file to a different path will also miss the cache since the GCS URI is part of the cache key.
    - **Inputs** — This is where you fill in all the input variables.
 
 4. Fill in the required inputs at minimum:
@@ -331,7 +331,7 @@ Once the workflow completes successfully:
 - **HTRMS converted files** (if conversion was enabled) are in the `call-htrms_conversion/` folder.
   To copy all converted files to your own GCS bucket:
   ```bash
-  gcloud storage cp -r "gs://fc-your-bucket/submissions/YOUR-JOB-ID/call-htrms_conversion/**.htrms" gs://fc-your-bucket/htrms-output/
+  gcloud storage cp "gs://fc-your-bucket/submissions/YOUR-JOB-ID/call-htrms_conversion/**/*.htrms" gs://fc-your-bucket/htrms-output/
   ```
 
 To download results to your local machine:
@@ -355,7 +355,7 @@ Increase the `disk_size_multiplier` input (e.g., from `3` to `4` or `5`). If the
 Re-authenticate your machine with your Broad Google account using `gcloud auth login`. This is the most common cause: another user previously signed in on the same computer, and their credentials are being used instead of yours. See the [authentication section](#step-1-set-up-gcloud-cli-and-authenticate) above for details.
 
 **My job ran but I got no output or `.sne` files.**
-Check the logs for the `dia_analysis_binned` task. Confirm that your `directDIA_settings` file is valid and compatible with your Spectronaut version (`v20.4`).
+Check the logs for the `dia_analysis_binned` task. Confirm that your `directDIA_settings` file is valid and compatible with the Spectronaut version supported by this workflow.
 
 **I'm not sure how many VMs to use.**
 A reasonable starting point is one VM per 20–30 files. For 200 files, `num_vms = 8` or `num_vms = 10` works well. The workflow will not create more VMs than you have files — if you request 20 VMs for 15 files, it will automatically scale down to 15 VMs.
