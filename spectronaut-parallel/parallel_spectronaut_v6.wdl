@@ -628,7 +628,7 @@ task htrms_conversion {
         bootDiskSizeGb: 32
         disks: "local-disk 300 HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
+        cpuPlatform: "Intel Cascade Lake"
     }
 }
 
@@ -864,7 +864,7 @@ task directDIA_single_vm {
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
+        cpuPlatform: "Intel Cascade Lake"
     }
 }
 
@@ -1115,7 +1115,7 @@ task pulsar_step1_binned {
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
+        cpuPlatform: "Intel Cascade Lake"
     }
 }
 
@@ -1329,7 +1329,7 @@ task pulsar_step2_combine_models {
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
+        cpuPlatform: "Intel Cascade Lake"
     }
 }
 
@@ -1576,7 +1576,7 @@ task pulsar_step3_binned {
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
+        cpuPlatform: "Intel Cascade Lake"
     }
 }
 
@@ -1776,7 +1776,7 @@ task combine_final_archives {
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
+        cpuPlatform: "Intel Cascade Lake"
     }
 }
 
@@ -1997,7 +1997,7 @@ task dia_analysis_binned {
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
+        cpuPlatform: "Intel Cascade Lake"
     }
 }
 
@@ -2225,7 +2225,7 @@ task combine_sne {
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
+        cpuPlatform: "Intel Cascade Lake"
     }
 }
 
