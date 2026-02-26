@@ -78,6 +78,14 @@ workflow parallel_spectronaut {
         Int n_preemptible_combine_sne = 0  # SNE combining preemptible attempts
         Int n_preemptible_htrms_conversion = 2  # Preemptible attempts for conversion
         Boolean generate_sne_large_experiment = true  # If true, use manageSNE --merge; if false, use spectronaut combine
+
+        # ============================================================================
+        # Spectral Library Bypass Configuration
+        # ============================================================================
+        Boolean skip_pulsar = false  # Skip Pulsar steps and use user-provided libraries directly
+        File? spectral_library_1     # Optional user-provided spectral library (.kit file)
+        File? spectral_library_2     # Optional user-provided spectral library (.kit file)
+        File? spectral_library_3     # Optional user-provided spectral library (.kit file)
     }
 
     # Compute preset configurations based on experiment_type
@@ -160,6 +168,10 @@ workflow parallel_spectronaut {
     String validated_experiment_type = if (experiment_type == "proteome" || experiment_type
         == "ptm") then experiment_type else "proteome"
 
+    # Derived booleans for spectral library bypass logic
+    Boolean has_library = defined(spectral_library_1) || defined(spectral_library_2) || defined(spectral_library_3)
+    Boolean run_pulsar = !skip_pulsar
+
     # Look up values based on validated_experiment_type
     Int pulsar_step1_cpu = pulsar_step1_cpu_presets[validated_experiment_type]
     Int pulsar_step1_ram_gb = pulsar_step1_ram_gb_presets[validated_experiment_type]
@@ -187,6 +199,12 @@ workflow parallel_spectronaut {
     # ============================================================================
     # PHASE I: Discovery
     # ============================================================================
+
+    # Validate skip_pulsar + library combination before any expensive tasks
+    call validate_skip_pulsar { input:
+        skip_pulsar = skip_pulsar,
+        has_library = has_library,
+    }
 
     # List all raw files in the input directory and count them
     call list_files { input:
@@ -313,88 +331,112 @@ workflow parallel_spectronaut {
         Float bin_size_per_vm = finalized_total_size_gb / calculated_num_vms + 25
 
         # ========================================================================
-        # STEP 1.1: Generate intermediate search archives per bin (scatter)
+        # STEPS 1.1-1.4: Pulsar pipeline (skipped when skip_pulsar=true)
         # ========================================================================
-        scatter (i in range(length(search_file_bins))) {
-            call pulsar_step1_binned { input:
-                input_files = search_file_bins[i],
-                analysis_schema = directDIA_settings,
-                fasta_1 = fasta_1,
-                fasta_2 = fasta_2,
-                fasta_3 = fasta_3,
-                enzyme_database = enzyme_database,
-                do_conversion = do_conversion,
-                cpu = pulsar_step1_cpu,
-                ram_gb = pulsar_step1_ram_gb,
-                bin_index = i,
-                n_preemptible = n_preemptible_pulsar_step1,
-                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
+        if (run_pulsar) {
+
+            # ========================================================================
+            # STEP 1.1: Generate intermediate search archives per bin (scatter)
+            # ========================================================================
+            scatter (i in range(length(search_file_bins))) {
+                call pulsar_step1_binned { input:
+                    input_files = search_file_bins[i],
+                    analysis_schema = directDIA_settings,
+                    fasta_1 = fasta_1,
+                    fasta_2 = fasta_2,
+                    fasta_3 = fasta_3,
+                    enzyme_database = enzyme_database,
+                    do_conversion = do_conversion,
+                    cpu = pulsar_step1_cpu,
+                    ram_gb = pulsar_step1_ram_gb,
+                    bin_index = i,
+                    n_preemptible = n_preemptible_pulsar_step1,
+                    allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
+                }
             }
-        }
 
-        # Collect all intermediate archives (one per bin)
-        Array[File] intermediate_archives = pulsar_step1_binned.intermediate_archive
+            # Collect all intermediate archives (one per bin)
+            Array[File] intermediate_archives = pulsar_step1_binned.intermediate_archive
 
-        # ========================================================================
-        # STEP 1.2: Combine intermediate archives to generate optimized models
-        # ========================================================================
-        call pulsar_step2_combine_models { input:
-            intermediate_archives = intermediate_archives,
-            experiment_name = experiment_name,
-
-            cpu = pulsar_step2_cpu,
-            ram_gb = pulsar_step2_ram_gb,
-            enzyme_database = enzyme_database,
-            analysis_schema = directDIA_settings,
-            n_preemptible = n_preemptible_pulsar_step2,
-            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
-        }
-
-        # ========================================================================
-        # STEP 1.3: Generate final search archives per bin with optimized models
-        # ========================================================================
-        scatter (i in range(length(search_file_bins))) {
-            call pulsar_step3_binned { input:
-                input_files = search_file_bins[i],
-                intermediate_archive = pulsar_step1_binned.intermediate_archive[i],
-                optimized_models = pulsar_step2_combine_models.optimized_models,
+            # ========================================================================
+            # STEP 1.2: Combine intermediate archives to generate optimized models
+            # ========================================================================
+            call pulsar_step2_combine_models { input:
+                intermediate_archives = intermediate_archives,
                 experiment_name = experiment_name,
-                analysis_schema = directDIA_settings,
+
+                cpu = pulsar_step2_cpu,
+                ram_gb = pulsar_step2_ram_gb,
                 enzyme_database = enzyme_database,
-                do_conversion = do_conversion,
-                cpu = pulsar_step3_cpu,
-                ram_gb = pulsar_step3_ram_gb,
-                bin_index = i,
-                n_preemptible = n_preemptible_pulsar_step3,
-                allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
+                analysis_schema = directDIA_settings,
+                n_preemptible = n_preemptible_pulsar_step2,
+                allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
             }
-        }
 
-        # Collect all final archives (one per bin)
-        Array[String] final_archives = pulsar_step3_binned.final_archive
+            # ========================================================================
+            # STEP 1.3: Generate final search archives per bin with optimized models
+            # ========================================================================
+            scatter (i in range(length(search_file_bins))) {
+                call pulsar_step3_binned { input:
+                    input_files = search_file_bins[i],
+                    intermediate_archive = pulsar_step1_binned.intermediate_archive[i],
+                    optimized_models = pulsar_step2_combine_models.optimized_models,
+                    experiment_name = experiment_name,
+                    analysis_schema = directDIA_settings,
+                    enzyme_database = enzyme_database,
+                    do_conversion = do_conversion,
+                    cpu = pulsar_step3_cpu,
+                    ram_gb = pulsar_step3_ram_gb,
+                    bin_index = i,
+                    n_preemptible = n_preemptible_pulsar_step3,
+                    allocated_disk_gb = ceil(bin_size_per_vm * disk_size_multiplier),
+                }
+            }
+
+            # Collect all final archives (one per bin)
+            Array[String] final_archives = pulsar_step3_binned.final_archive
+
+            # ========================================================================
+            # STEP 1.4: Merge final search archives into single .kit library
+            # ========================================================================
+            call combine_final_archives { input:
+                input_archives = final_archives,
+
+                cpu = combine_archives_cpu,
+                ram_gb = combine_archives_ram_gb,
+                enzyme_database = enzyme_database,
+                analysis_schema = directDIA_settings,
+                n_preemptible = n_preemptible_combine_archives,
+                allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
+            }
+
+        }  # end if (run_pulsar)
+
+        # Build the complete list of search archives for DIA analysis.
+        # combine_final_archives.merged_archive is File? (output of nested if block).
+        # User-provided libraries are also File? (optional inputs).
+        # select_all filters out undefined values, producing Array[File].
+        #
+        # Case: skip_pulsar=false, no libraries  → [pulsar_archive]          (current behavior)
+        # Case: skip_pulsar=false, ≥1 library    → [pulsar_archive, lib1, …] (pulsar + user libs)
+        # Case: skip_pulsar=true,  ≥1 library    → [lib1, …]                 (user libs only)
+        # Case: skip_pulsar=true,  no libraries  → caught by validate_skip_pulsar before reaching here
+        Array[File?] candidate_archives = [
+            combine_final_archives.merged_archive,
+            spectral_library_1,
+            spectral_library_2,
+            spectral_library_3,
+        ]
+        Array[File] search_archives = select_all(candidate_archives)
 
         # ========================================================================
-        # STEP 1.4: Merge final search archives into single .kit library
-        # ========================================================================
-        call combine_final_archives { input:
-            input_archives = final_archives,
-
-            cpu = combine_archives_cpu,
-            ram_gb = combine_archives_ram_gb,
-            enzyme_database = enzyme_database,
-            analysis_schema = directDIA_settings,
-            n_preemptible = n_preemptible_combine_archives,
-            allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
-        }
-
-        # ========================================================================
-        # STEP 2: DIA analysis per bin against merged library
+        # STEP 2: DIA analysis per bin against all search archives
         # ========================================================================
         scatter (i in range(length(search_file_bins))) {
             call dia_analysis_binned { input:
                 experiment_name = experiment_name,
                 input_files = search_file_bins[i],
-                search_archive = combine_final_archives.merged_archive,
+                search_archives = search_archives,
                 analysis_schema = directDIA_settings,
                 enzyme_database = enzyme_database,
                 cpu = dia_analysis_cpu,
@@ -1782,7 +1824,7 @@ task combine_final_archives {
 
 task dia_analysis_binned {
     input {
-        File search_archive
+        Array[String] search_archives
         File analysis_schema
         Array[String] input_files
         String experiment_name
@@ -1852,7 +1894,7 @@ task dia_analysis_binned {
             -n "~{experiment_name}_bin_~{bin_index}" \
             -o "${output_dir}" \
             -d "${input_dir}" \
-            -a "~{search_archive}" \
+            ~{sep(" ", prefix("-a ", search_archives))} \
             -setTemp "${tmp_dir}" 2>&1 | tee dia_analysis_bin_~{bin_index}.log
 
         # Find all .sne files produced
@@ -2226,6 +2268,35 @@ task combine_sne {
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
         cpuPlatform: "Intel Cascade Lake"
+    }
+}
+
+task validate_skip_pulsar {
+    input {
+        Boolean skip_pulsar
+        Boolean has_library
+    }
+
+    command <<<
+        set -euo pipefail
+        if [ "~{skip_pulsar}" = "true" ] && [ "~{has_library}" = "false" ]; then
+            echo "ERROR: skip_pulsar=true requires at least one spectral library." >&2
+            echo "Provide spectral_library_1, spectral_library_2, or spectral_library_3." >&2
+            exit 1
+        fi
+        echo "Validation passed."
+    >>>
+
+    output {
+        String validation_status = read_string(stdout())
+    }
+
+    runtime {
+        docker: "ubuntu:22.04"
+        cpu: 1
+        memory: "1GB"
+        disks: "local-disk 10 HDD"
+        preemptible: 3
     }
 }
 
