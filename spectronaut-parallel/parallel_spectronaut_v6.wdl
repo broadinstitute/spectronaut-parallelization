@@ -83,9 +83,9 @@ workflow parallel_spectronaut {
         # Spectral Library Bypass Configuration
         # ============================================================================
         Boolean skip_pulsar = false  # Skip Pulsar steps and use user-provided libraries directly
-        File? spectral_library_1     # Optional user-provided spectral library (.kit file)
-        File? spectral_library_2     # Optional user-provided spectral library (.kit file)
-        File? spectral_library_3     # Optional user-provided spectral library (.kit file)
+        String? spectral_library_1   # Optional user-provided spectral library (.kit file, GCS path)
+        String? spectral_library_2   # Optional user-provided spectral library (.kit file, GCS path)
+        String? spectral_library_3   # Optional user-provided spectral library (.kit file, GCS path)
     }
 
     # Compute preset configurations based on experiment_type
@@ -394,7 +394,7 @@ workflow parallel_spectronaut {
             }
 
             # Collect all final archives (one per bin)
-            Array[String] final_archives = pulsar_step3_binned.final_archive
+            Array[File] final_archives = pulsar_step3_binned.final_archive
 
             # ========================================================================
             # STEP 1.4: Merge final search archives into single .kit library
@@ -412,22 +412,14 @@ workflow parallel_spectronaut {
 
         }  # end if (run_pulsar)
 
-        # Build the complete list of search archives for DIA analysis.
-        # combine_final_archives.merged_archive is File? (output of nested if block).
-        # User-provided libraries are also File? (optional inputs).
-        # select_all filters out undefined values, producing Array[File].
+        # Search archives are passed directly to dia_analysis_binned as two separate typed inputs:
+        # - merged_archive: File? — Pulsar-generated .kit spectral library (combine_final_archives.combined_archive_library; undefined when skip_pulsar=true)
+        # - user_spectral_libraries: Array[String] — User-provided .kit GCS paths, downloaded at runtime
         #
-        # Case: skip_pulsar=false, no libraries  → [pulsar_archive]          (current behavior)
-        # Case: skip_pulsar=false, ≥1 library    → [pulsar_archive, lib1, …] (pulsar + user libs)
-        # Case: skip_pulsar=true,  ≥1 library    → [lib1, …]                 (user libs only)
+        # Case: skip_pulsar=false, no libraries  → merged_archive defined, user_spectral_libraries empty
+        # Case: skip_pulsar=false, ≥1 library    → merged_archive defined, user_spectral_libraries non-empty
+        # Case: skip_pulsar=true,  ≥1 library    → merged_archive undefined, user_spectral_libraries non-empty
         # Case: skip_pulsar=true,  no libraries  → caught by validate_skip_pulsar before reaching here
-        Array[File?] candidate_archives = [
-            combine_final_archives.merged_archive,
-            spectral_library_1,
-            spectral_library_2,
-            spectral_library_3,
-        ]
-        Array[File] search_archives = select_all(candidate_archives)
 
         # ========================================================================
         # STEP 2: DIA analysis per bin against all search archives
@@ -436,7 +428,8 @@ workflow parallel_spectronaut {
             call dia_analysis_binned { input:
                 experiment_name = experiment_name,
                 input_files = search_file_bins[i],
-                search_archives = search_archives,
+                merged_archive = combine_final_archives.combined_archive_library,
+                user_spectral_libraries = select_all([spectral_library_1, spectral_library_2, spectral_library_3]),
                 analysis_schema = directDIA_settings,
                 enzyme_database = enzyme_database,
                 cpu = dia_analysis_cpu,
@@ -1625,7 +1618,7 @@ task pulsar_step3_binned {
 task combine_final_archives {
     input {
         File analysis_schema
-        Array[String] input_archives
+        Array[File] input_archives
         Int cpu
         Int ram_gb
         Int allocated_disk_gb
@@ -1664,7 +1657,7 @@ task combine_final_archives {
         echo "Copying archives for merging..."
         while IFS= read -r archive; do
             if [ -n "${archive}" ]; then
-                gcloud storage cp -r "${archive}" "${work_archives}/"
+                cp "${archive}" "${work_archives}/"
             fi
         done < ~{write_lines(input_archives)}
 
@@ -1808,7 +1801,7 @@ task combine_final_archives {
     >>>
 
     output {
-        File merged_archive = "merged_library.kit"
+        File combined_archive_library = "merged_library.kit"
     }
 
     runtime {
@@ -1824,7 +1817,8 @@ task combine_final_archives {
 
 task dia_analysis_binned {
     input {
-        Array[String] search_archives
+        File? merged_archive
+        Array[String] user_spectral_libraries
         File analysis_schema
         Array[String] input_files
         String experiment_name
@@ -1887,6 +1881,19 @@ task dia_analysis_binned {
         file_count=$(find "${input_dir}" -type f | wc -l)
         echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
 
+        # Download user-provided spectral libraries from GCS
+        user_lib_dir="${cromwell_root}/user_libraries"
+        mkdir -p "${user_lib_dir}"
+        user_lib_args=""
+        while IFS= read -r lib_path; do
+            if [ -n "${lib_path}" ]; then
+                echo "Downloading user spectral library: ${lib_path}"
+                gcloud storage cp -r "${lib_path}" "${user_lib_dir}/"
+                local_lib="${user_lib_dir}/$(basename "${lib_path}")"
+                user_lib_args="${user_lib_args} -a ${local_lib}"
+            fi
+        done < ~{write_lines(user_spectral_libraries)}
+
         # Run DIA analysis on ALL files in bin at once (batch processing)
         echo "Running DIA analysis for bin ~{bin_index} (batch processing ${file_count} files)..."
         spectronaut diaanalysis \
@@ -1894,7 +1901,8 @@ task dia_analysis_binned {
             -n "~{experiment_name}_bin_~{bin_index}" \
             -o "${output_dir}" \
             -d "${input_dir}" \
-            ~{sep(" ", prefix("-a ", search_archives))} \
+            ~{if defined(merged_archive) then "-a " + merged_archive else ""} \
+            ${user_lib_args} \
             -setTemp "${tmp_dir}" 2>&1 | tee dia_analysis_bin_~{bin_index}.log
 
         # Find all .sne files produced
