@@ -7,18 +7,37 @@
 
 ## Table of Contents
 
-1. [Introduction](#introduction)
-2. [What's New Compared to the Original Workflow](#whats-new-compared-to-the-original-workflow)
-3. [Getting Started: Input Variables](#getting-started-input-variables)
-4. [Usage on Terra and Google Cloud Platform](#usage-on-terra-and-google-cloud-platform)
-   - [Step 0: Prepare Your Input Files](#step-0-prepare-your-input-files)
-   - [Step 1: Set Up gcloud CLI and Authenticate](#step-1-set-up-gcloud-cli-and-authenticate)
-   - [Step 2: Upload Files to Your Terra Bucket](#step-2-upload-files-to-your-terra-bucket)
-   - [Step 3: Add the Workflow to Your Terra Workspace](#step-3-add-the-workflow-to-your-terra-workspace)
-   - [Step 4: Configure and Launch the Search](#step-4-configure-and-launch-the-search)
-   - [Step 5: Collect Your Results](#step-5-collect-your-results)
-5. [Troubleshooting](#troubleshooting)
-6. [Contacts](#contacts)
+- [parallel\_spectronaut — Parallelized Spectronaut directDIA Workflow](#parallel_spectronaut--parallelized-spectronaut-directdia-workflow)
+  - [Table of Contents](#table-of-contents)
+  - [Introduction](#introduction)
+    - [How the Workflow Works](#how-the-workflow-works)
+    - [Saving Money with Preemptible Instances](#saving-money-with-preemptible-instances)
+    - [Automatic Disk and Resource Sizing](#automatic-disk-and-resource-sizing)
+  - [What's New Compared to the Original Workflow](#whats-new-compared-to-the-original-workflow)
+  - [Getting Started: Input Variables](#getting-started-input-variables)
+    - [Required Inputs](#required-inputs)
+    - [Optional — Additional Databases \& Settings](#optional--additional-databases--settings)
+    - [Optional — HTRMS Conversion](#optional--htrms-conversion)
+    - [Optional — Spectral Library & Search Mode](#optional--spectral-library--search-mode)
+    - [Optional — Report Schemas](#optional--report-schemas)
+    - [Optional — Disk Sizing](#optional--disk-sizing)
+    - [Optional — Advanced Settings](#optional--advanced-settings)
+    - [Optional — Preemptible Instance Settings](#optional--preemptible-instance-settings)
+  - [Usage on Terra and Google Cloud Platform](#usage-on-terra-and-google-cloud-platform)
+    - [Step 0: Prepare Your Input Files](#step-0-prepare-your-input-files)
+    - [Step 1: Set Up gcloud CLI and Authenticate](#step-1-set-up-gcloud-cli-and-authenticate)
+      - [Installation](#installation)
+      - [Authenticate with Your Broad Google Account](#authenticate-with-your-broad-google-account)
+    - [Step 2: Upload Files to Your Terra Bucket](#step-2-upload-files-to-your-terra-bucket)
+      - [Upload a single file](#upload-a-single-file)
+      - [Upload an entire folder of raw files](#upload-an-entire-folder-of-raw-files)
+      - [Verify the upload](#verify-the-upload)
+      - [Uploading from an Instrument Computer (via TeamViewer)](#uploading-from-an-instrument-computer-via-teamviewer)
+    - [Step 3: Add the Workflow to Your Terra Workspace](#step-3-add-the-workflow-to-your-terra-workspace)
+    - [Step 4: Configure and Launch the Search](#step-4-configure-and-launch-the-search)
+    - [Step 5: Collect Your Results](#step-5-collect-your-results)
+  - [Troubleshooting](#troubleshooting)
+  - [Contacts](#contacts)
 
 ---
 
@@ -44,28 +63,26 @@ Your raw MS files (in Google Cloud)
 2. [Optional: HTRMS Conversion]  — Converts raw instrument files to .htrms format (per VM, in parallel)
         │
         ▼
-3. [Pulsar Step 1 — per VM]  — Each VM generates an intermediate search archive (.psar)
+3. [Pulsar Steps 1–4 — skipped if do_pulsar=false]  — Builds a per-experiment spectral library
+   3a. [Pulsar Step 1 — per VM]  — Each VM generates an intermediate search archive (.psar)
+   3b. [Pulsar Step 2 — one VM]  — All intermediate archives are combined to train optimized models
+   3c. [Pulsar Step 3 — per VM]  — Each VM generates a final search archive using the optimized models
+   3d. [Combine Archives — one VM]  — All final archives are merged into a single search library (.kit)
         │
         ▼
-4. [Pulsar Step 2 — one VM]  — All intermediate archives are combined to train optimized models
+4. [DIA Analysis — per VM]  — Each VM runs DIA analysis against the merged library, producing .sne files
         │
         ▼
-5. [Pulsar Step 3 — per VM]  — Each VM generates a final search archive using the optimized models
-        │
-        ▼
-6. [Combine Archives — one VM]  — All final archives are merged into a single search library (.kit)
-        │
-        ▼
-7. [DIA Analysis — per VM]  — Each VM runs DIA analysis against the merged library, producing .sne files
-        │
-        ▼
-8. [Combine SNE — one VM]  — All .sne files are merged and reports are generated
+5. [Combine SNE — one VM]  — All .sne files are merged and reports are generated
         │
         ▼
         spectronaut_output.zip  (your final results)
 ```
 
 If you set `num_vms = 1`, the workflow instead runs a classic single-VM directDIA search — no parallelization, simpler and cheaper for small datasets.
+
+> **Single-VM mode (`num_vms = 1`):** When `do_pulsar = true` (default), runs `spectronaut direct` (classic DirectDIA).
+> When `do_pulsar = false` with a user-provided spectral library, runs `spectronaut diaanalysis` against that library instead.
 
 ### Saving Money with Preemptible Instances
 
@@ -141,6 +158,15 @@ Below is a complete list of all input variables, sorted alphabetically. Variable
 | `convert_schema` | File (optional) | — | A custom HTRMS conversion schema (`.prop`), exported from the HTRMS Converter GUI. If not provided, Biognosys default settings are used, which works for most cases. |
 | `do_conversion` | Boolean | `false` | Set to `true` if your input files need to be converted to HTRMS format before searching. |
 
+### Optional — Spectral Library & Search Mode
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `do_pulsar` | Boolean | `true` | Controls the search strategy. When `true` (default), the workflow runs the full Pulsar multi-step search pipeline to build a spectral library from your own data. Set to `false` to skip Pulsar entirely and provide your own pre-built spectral library via `spectral_library_1/2/3`. Requires at least one `spectral_library_*` input when set to `false`. |
+| `spectral_library_1` | String (optional) | — | GCS path to a pre-built Spectronaut spectral library (`.kit` file). Used when `do_pulsar = false`. |
+| `spectral_library_2` | String (optional) | — | Second spectral library GCS path (optional). |
+| `spectral_library_3` | String (optional) | — | Third spectral library GCS path (optional). |
+
 ### Optional — Report Schemas
 
 | Variable | Type | Description |
@@ -157,6 +183,12 @@ Below is a complete list of all input variables, sorted alphabetically. Variable
 | `average_file_size_gb` | Float | `20` | Estimated average size of each input file in GB. Used for an early disk size estimate before actual file sizes are measured. The default of 20 GB is suitable for typical raw Astral files. |
 | `disk_size_multiplier` | Float | `3` | Safety multiplier applied to the total input data size when allocating disk space for most tasks. Increase this if you encounter "out of disk" errors. |
 | `sne_combine_disk_size_multiplier` | Float | `6` | Separate disk multiplier for the SNE combine step, which may need more space. |
+
+### Optional — Advanced Settings
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `generate_sne_large_experiment` | Boolean | `true` | Controls how the final SNE combine step merges results. When `true` (default), uses `manageSNE --merge` (recommended for large experiments — more memory-efficient). When `false`, uses `spectronaut combine` (legacy method). |
 
 ### Optional — Preemptible Instance Settings
 
@@ -363,10 +395,12 @@ A reasonable starting point is one VM per 20–30 files. For 200 files, `num_vms
 **The workflow says it is using `"proteome"` settings even though I typed `"ptm"`.**
 Double-check that you entered the value exactly as `"ptm"` (all lowercase, no spaces). Any unrecognized value for `experiment_type` will silently fall back to `"proteome"`.
 
+**I set `do_pulsar = false` but my job failed immediately with an error about spectral libraries.**
+When `do_pulsar = false`, you must provide at least one spectral library via `spectral_library_1` (and optionally `spectral_library_2`, `spectral_library_3`). The workflow validates this at startup and exits early if no library is supplied.
+
 ---
 
 ## Contacts
 
-- **C. Lian** — glian@broadinstitute.org
-- **D. R. Mani** — proteogenomics@broadinstitute.org
+- **Cameron Lian** — glian@broadinstitute.org
 - **Broad Institute Proteogenomics Team** — proteogenomics@broadinstitute.org
