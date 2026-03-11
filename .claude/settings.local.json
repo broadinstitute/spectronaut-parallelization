@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(miniwdl check:*)",
+      "WebFetch(domain:biognosys.com)",
+      "Bash(dos2unix:*)",
+      "Bash(command -v miniwdl:*)",
+      "WebSearch",
+      "Bash(command -v:*)",
+      "WebFetch(domain:cromwell.readthedocs.io)",
+      "WebFetch(domain:support.terra.bio)",
+      "WebFetch(domain:docs.cloud.google.com)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(pip3 install:*)",
+      "Bash(womtool validate:*)",
+      "Bash(git -C /Users/cameronlian/Desktop/development/panoply-workflow-dev status)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
