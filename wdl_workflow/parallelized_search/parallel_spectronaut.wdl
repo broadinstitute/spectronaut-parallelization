@@ -91,24 +91,24 @@ workflow parallel_spectronaut {
     # Compute preset configurations based on experiment_type
     # Pulsar Step 1: Generate intermediate search archives (similar to directDIA search)
     Map[String, Int] pulsar_step1_cpu_presets = {
-        "proteome": 35,
-        "ptm": 45,
+        "proteome": 50,
+        "ptm": 64,
     }
     # Absolute RAM allocation (GB)
     Map[String, Int] pulsar_step1_ram_gb_presets = {
-        "proteome": 100,
-        "ptm": 120,
+        "proteome": 128,
+        "ptm": 156,
     }
 
     # Pulsar Step 2: Combine intermediate archives and train models (memory-intensive)
     Map[String, Int] pulsar_step2_cpu_presets = {
         "proteome": 25,
-        "ptm": 30,
+        "ptm": 32,
     }
     # Base RAM per total file (GB/file) for dynamic scaling
     Map[String, Float] pulsar_step2_base_ram_per_file_presets = {
-        "proteome": 1.2,
-        "ptm": 1.4,
+        "proteome": 1.0,
+        "ptm": 1.2,
     }
 
     # Pulsar Step 3: Generate final archives with optimized models (compute-intensive)
@@ -118,19 +118,19 @@ workflow parallel_spectronaut {
     }
     # Absolute RAM allocation (GB)
     Map[String, Int] pulsar_step3_ram_gb_presets = {
-        "proteome": 100,
-        "ptm": 120,
+        "proteome": 96,
+        "ptm": 128,
     }
 
     # Combine final archives into .kit library
     Map[String, Int] combine_archives_cpu_presets = {
         "proteome": 25,
-        "ptm": 30,
+        "ptm": 32,
     }
     # Base RAM per total file (GB/file) for dynamic scaling
     Map[String, Float] combine_archives_base_ram_per_file_presets = {
-        "proteome": 1.2,
-        "ptm": 1.4,
+        "proteome": 1.0,
+        "ptm": 1.2,
     }
 
     # DirectDIA single VM (does both search and analysis in one step)
@@ -150,18 +150,23 @@ workflow parallel_spectronaut {
     }
     # Absolute RAM allocation (GB)
     Map[String, Int] dia_analysis_ram_gb_presets = {
-        "proteome": 100,
-        "ptm": 120,
+        "proteome": 96,
+        "ptm": 128,
     }
 
     Map[String, Int] combine_sne_cpu_presets = {
         "proteome": 25,
         "ptm": 30,
     }
-    # Base RAM per total file (GB/file) for dynamic scaling
-    Map[String, Float] combine_sne_base_ram_per_file_presets = {
-        "proteome": 1.8,
-        "ptm": 2.0,
+    # Base RAM per total file (GB/file) for dynamic scaling — manageSNE --merge mode
+    Map[String, Float] combine_sne_ram_per_file_merge_presets = {
+        "proteome": 5.0,
+        "ptm": 6.0,
+    }
+    # Base RAM per total file (GB/file) for dynamic scaling — spectronaut combine mode
+    Map[String, Float] combine_sne_ram_per_file_combine_presets = {
+        "proteome": 3.0,
+        "ptm": 4.0,
     }
 
     # Validate experiment_type and fallback to "proteome" if invalid
@@ -194,7 +199,8 @@ workflow parallel_spectronaut {
     Int dia_analysis_ram_gb = dia_analysis_ram_gb_presets[validated_experiment_type]
 
     Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
-    Float combine_sne_base_ram_per_file = combine_sne_base_ram_per_file_presets[validated_experiment_type]
+    Float combine_sne_ram_per_file_merge = combine_sne_ram_per_file_merge_presets[validated_experiment_type]
+    Float combine_sne_ram_per_file_combine = combine_sne_ram_per_file_combine_presets[validated_experiment_type]
 
     # ============================================================================
     # PHASE I: Discovery
@@ -245,6 +251,19 @@ workflow parallel_spectronaut {
         htrms_conversion.htrms_file,
     ]) else all_input_file_paths
 
+    # ============================================================================
+    # PHASE II (continued): Bin files for parallel processing
+    # ============================================================================
+    # Bins are created AFTER HTRMS conversion so that when do_conversion=true,
+    # the bins contain the converted .htrms GCS paths (not the stale raw paths).
+    # files_for_search already resolves to the correct paths in both cases.
+    if (num_vms > 1) {
+        call create_bins { input:
+            file_paths = files_for_search,
+            num_bins = num_vms,
+        }
+    }
+
     Float finalized_total_size_gb = select_first([
         sum_floats.total_size,
         total_input_size_gb,
@@ -263,9 +282,7 @@ workflow parallel_spectronaut {
             then ceil(combine_archives_base_ram_per_file * list_files.num_files)
             else 128
 
-    Float combine_sne_ram_per_file_true  = 5.0
-    Float combine_sne_ram_per_file_false = 3.0
-    Float combine_sne_ram_per_file = if generate_sne_large_experiment then combine_sne_ram_per_file_true else combine_sne_ram_per_file_false
+    Float combine_sne_ram_per_file = if generate_sne_large_experiment then combine_sne_ram_per_file_merge else combine_sne_ram_per_file_combine
     Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_file * list_files.num_files) > 750
         then 750
         else if ceil(combine_sne_ram_per_file * list_files.num_files) > 64
@@ -281,15 +298,7 @@ workflow parallel_spectronaut {
 
     # Logic:
     # If num_vms == 1: No binning. calculated_num_vms = 1.
-    # If num_vms > 1: Run create_search_bins. calculated_num_vms comes from there.
-
-    if (num_vms > 1) {
-        # Re-bin the files for downstream parallel tasks
-        call create_bins { input:
-            file_paths = all_input_file_paths,
-            num_bins = num_vms,
-        }
-    }
+    # If num_vms > 1: Run create_bins (already called above). calculated_num_vms comes from there.
 
     Int calculated_num_vms = if (num_vms > 1) then read_int(select_first([
         create_bins.calculated_num_vms_file,

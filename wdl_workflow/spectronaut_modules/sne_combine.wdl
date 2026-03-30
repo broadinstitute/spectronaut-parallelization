@@ -10,6 +10,9 @@ workflow sne_combine {
         # Mode toggle
         Boolean produce_final_sne = true
 
+        # Experiment type for resource presets ("proteome" or "ptm")
+        String experiment_type = "proteome"
+
         # Disk size multiplier applied to total .sne file size (default: 50)
         Float disk_size_multiplier = 50.0
 
@@ -25,24 +28,45 @@ workflow sne_combine {
         File? enzyme_database
     }
 
-    Int combine_sne_cpu = 32
+    # Validate experiment_type and fallback to "proteome" if invalid
+    String validated_experiment_type = if (experiment_type == "proteome" || experiment_type
+        == "ptm") then experiment_type else "proteome"
+
+    Map[String, Int] combine_sne_cpu_presets = {
+        "proteome": 32,
+        "ptm": 48,
+    }
+    # RAM per GB of SNE data — manageSNE --merge mode (produce_final_sne=true)
+    Map[String, Float] combine_sne_ram_per_gb_merge_presets = {
+        "proteome": 3.0,
+        "ptm": 5.0,
+    }
+    # RAM per GB of SNE data — spectronaut combine mode (produce_final_sne=false)
+    Map[String, Float] combine_sne_ram_per_gb_combine_presets = {
+        "proteome": 2.0,
+        "ptm": 3.5,
+    }
+
+    Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
+    Float combine_sne_ram_per_gb_merge = combine_sne_ram_per_gb_merge_presets[validated_experiment_type]
+    Float combine_sne_ram_per_gb_combine = combine_sne_ram_per_gb_combine_presets[validated_experiment_type]
 
     call measure_sne_size {
         input:
             sne_directory = sne_directory,
     }
 
-    # RAM: scale with total SNE size (floor of 64 GB)
-    Float ram_per_gb_sne_produceTRUE  = 5.0
-    Float ram_per_gb_sne_produceFALSE = 3.0
-    Float ram_per_gb_sne = if produce_final_sne then ram_per_gb_sne_produceTRUE else ram_per_gb_sne_produceFALSE
-    Int combine_sne_ram_gb = if ceil(ram_per_gb_sne * measure_sne_size.total_sne_size_gb) > 64
-                             then ceil(ram_per_gb_sne * measure_sne_size.total_sne_size_gb)
-                             else 64
+    # RAM: scale with total SNE size, select rate based on mode (floor 64 GB, cap 750 GB)
+    Float combine_sne_ram_per_gb = if produce_final_sne then combine_sne_ram_per_gb_merge else combine_sne_ram_per_gb_combine
+    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb) > 750
+                             then 750
+                             else if ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb) > 64
+                                 then ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb)
+                                 else 64
 
-    Int allocated_disk_gb = if ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier) > 50
+    Int allocated_disk_gb = if ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier) > 500
         then ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier)
-        else 50
+        else 500
 
     call combine_sne {
         input:
@@ -115,10 +139,12 @@ task combine_sne {
         sne_dir="${cromwell_root}/work_snes"
         mkdir -p "${sne_dir}"
 
-        echo "Copying SNE files recursively from ~{sne_directory} ..."
-        gcloud storage cp -r "~{sne_directory}/**.sne" "${sne_dir}/"
+        # Copy all .sne files (including from subfolders) into a flat directory.
+        # The ** glob matches .sne files at any depth; omitting -r flattens them.
+        echo "Copying SNE files from ~{sne_directory} (including subfolders)..."
+        gcloud storage cp "~{sne_directory}/**.sne" "${sne_dir}/"
 
-        sne_count=$(find "${sne_dir}" -name "*.sne" | wc -l)
+        sne_count=$(find "${sne_dir}" -maxdepth 1 -name "*.sne" | wc -l)
         echo "Found ${sne_count} .sne file(s)."
         if [ "${sne_count}" -eq 0 ]; then
             echo "ERROR: No .sne files found under ~{sne_directory}" >&2
@@ -294,7 +320,6 @@ task combine_sne {
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
         preemptible: n_preemptible
-        cpuPlatform: "AMD Rome"
     }
 }
 
@@ -307,6 +332,7 @@ task measure_sne_size {
         set -euo pipefail
 
         # Use gcloud storage ls -l with recursive glob to list all .sne files and their sizes
+        # The ** glob matches .sne files at any depth (including subfolders)
         # The -l flag outputs: SIZE  DATE  gs://...
         total_bytes=$(gcloud storage ls -l "~{sne_directory}/**.sne" 2>/dev/null \
             | grep -v '^TOTAL:' \
