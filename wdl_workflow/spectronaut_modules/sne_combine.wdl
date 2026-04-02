@@ -10,63 +10,42 @@ workflow sne_combine {
         # Mode toggle
         Boolean produce_final_sne = true
 
-        # Experiment type for resource presets ("proteome" or "ptm")
-        String experiment_type = "proteome"
-
         # Disk size multiplier applied to total .sne file size (default: 50)
         Float disk_size_multiplier = 50.0
 
-        # Preemptible
-        Int n_preemptible_combine_sne = 0
-
         # Optional
         File? condition_setup
-        File? report_schema_1
-        File? report_schema_2
-        File? report_schema_3
-        File? report_schema_4
+        File? normal_report_schema_1
+        File? normal_report_schema_2
+        File? normal_report_schema_3
+        File? normal_report_schema_4
         File? enzyme_database
     }
 
-    # Validate experiment_type and fallback to "proteome" if invalid
-    String validated_experiment_type = if (experiment_type == "proteome" || experiment_type
-        == "ptm") then experiment_type else "proteome"
-
-    Map[String, Int] combine_sne_cpu_presets = {
-        "proteome": 32,
-        "ptm": 48,
-    }
+    Int combine_sne_cpu = 28
     # RAM per GB of SNE data — manageSNE --merge mode (produce_final_sne=true)
-    Map[String, Float] combine_sne_ram_per_gb_merge_presets = {
-        "proteome": 3.0,
-        "ptm": 5.0,
-    }
+    Float combine_sne_ram_per_gb_merge = 3.0
     # RAM per GB of SNE data — spectronaut combine mode (produce_final_sne=false)
-    Map[String, Float] combine_sne_ram_per_gb_combine_presets = {
-        "proteome": 2.0,
-        "ptm": 3.5,
-    }
-
-    Int combine_sne_cpu = combine_sne_cpu_presets[validated_experiment_type]
-    Float combine_sne_ram_per_gb_merge = combine_sne_ram_per_gb_merge_presets[validated_experiment_type]
-    Float combine_sne_ram_per_gb_combine = combine_sne_ram_per_gb_combine_presets[validated_experiment_type]
+    Float combine_sne_ram_per_gb_combine = 0.8
 
     call measure_sne_size {
         input:
             sne_directory = sne_directory,
     }
 
-    # RAM: scale with total SNE size, select rate based on mode (floor 64 GB, cap 750 GB)
+    # RAM: scale with total SNE size, select rate based on mode (floor 64 GB, cap 700 GB)
     Float combine_sne_ram_per_gb = if produce_final_sne then combine_sne_ram_per_gb_merge else combine_sne_ram_per_gb_combine
-    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb) > 750
-                             then 750
+    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb) > 700
+                             then 700
                              else if ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb) > 64
                                  then ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb)
                                  else 64
 
-    Int allocated_disk_gb = if ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier) > 500
-        then ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier)
-        else 500
+    Int allocated_disk_gb = if ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier) > 10000
+        then 10000
+        else if ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier) > 500
+            then ceil(measure_sne_size.total_sne_size_gb * disk_size_multiplier)
+            else 500
 
     call combine_sne {
         input:
@@ -77,12 +56,11 @@ workflow sne_combine {
             ram_gb = combine_sne_ram_gb,
             cpu = combine_sne_cpu,
             allocated_disk_gb = allocated_disk_gb,
-            n_preemptible = n_preemptible_combine_sne,
             condition_setup = condition_setup,
-            report_schema_1 = report_schema_1,
-            report_schema_2 = report_schema_2,
-            report_schema_3 = report_schema_3,
-            report_schema_4 = report_schema_4,
+            normal_report_schema_1 = normal_report_schema_1,
+            normal_report_schema_2 = normal_report_schema_2,
+            normal_report_schema_3 = normal_report_schema_3,
+            normal_report_schema_4 = normal_report_schema_4,
             enzyme_database = enzyme_database,
     }
 
@@ -100,12 +78,11 @@ task combine_sne {
         Int ram_gb
         Int cpu
         Int allocated_disk_gb
-        Int n_preemptible
         File? condition_setup
-        File? report_schema_1
-        File? report_schema_2
-        File? report_schema_3
-        File? report_schema_4
+        File? normal_report_schema_1
+        File? normal_report_schema_2
+        File? normal_report_schema_3
+        File? normal_report_schema_4
         File? enzyme_database
     }
 
@@ -164,10 +141,10 @@ task combine_sne {
                 -d "${sne_dir}" \
                 ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
                 -s "~{analysis_schema}" \
-                ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
-                ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
-                ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
-                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+                ~{if defined(normal_report_schema_1) then "-rs " + normal_report_schema_1 else ""} \
+                ~{if defined(normal_report_schema_2) then "-rs " + normal_report_schema_2 else ""} \
+                ~{if defined(normal_report_schema_3) then "-rs " + normal_report_schema_3 else ""} \
+                ~{if defined(normal_report_schema_4) then "-rs " + normal_report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
         else
             spectronaut combine \
                 -n "~{experiment_name}" \
@@ -175,10 +152,10 @@ task combine_sne {
                 -d "${sne_dir}" \
                 ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
                 -s "~{analysis_schema}" \
-                ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
-                ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
-                ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
-                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+                ~{if defined(normal_report_schema_1) then "-rs " + normal_report_schema_1 else ""} \
+                ~{if defined(normal_report_schema_2) then "-rs " + normal_report_schema_2 else ""} \
+                ~{if defined(normal_report_schema_3) then "-rs " + normal_report_schema_3 else ""} \
+                ~{if defined(normal_report_schema_4) then "-rs " + normal_report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
         fi
 
         echo "Creating output archive..."
@@ -314,12 +291,12 @@ task combine_sne {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.4"
+        docker: "broadcptacdev/panoply_spectronaut:v20.5"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
         disks: "local-disk ~{allocated_disk_gb} HDD"
-        preemptible: n_preemptible
+        preemptible: 0
     }
 }
 
