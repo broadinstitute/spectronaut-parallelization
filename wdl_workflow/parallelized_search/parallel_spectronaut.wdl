@@ -34,6 +34,7 @@ workflow parallel_spectronaut {
         File? fasta_2  # Additional FASTA database file
         File? fasta_3  # Additional FASTA database file
         File? enzyme_database  # Custom enzyme database
+        File? custom_mod_repository  # Custom modification repository imported via --importModRepository
         File? json_settings  # JSON settings for Spectronaut
         File? condition_setup  # Experimental condition setup
 
@@ -332,6 +333,7 @@ workflow parallel_spectronaut {
             ram_gb = directDIA_single_vm_ram_gb,
             n_preemptible = n_preemptible_directDIA_single_vm,
             allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
+            custom_mod_repository = custom_mod_repository,
         }
     }
 
@@ -357,6 +359,7 @@ workflow parallel_spectronaut {
                     fasta_2 = fasta_2,
                     fasta_3 = fasta_3,
                     enzyme_database = enzyme_database,
+                    custom_mod_repository = custom_mod_repository,
                     cpu = pulsar_step1_cpu,
                     ram_gb = pulsar_step1_ram_gb,
                     bin_index = i,
@@ -378,6 +381,7 @@ workflow parallel_spectronaut {
                 cpu = pulsar_step2_cpu,
                 ram_gb = pulsar_step2_ram_gb,
                 enzyme_database = enzyme_database,
+                custom_mod_repository = custom_mod_repository,
                 analysis_schema = directDIA_settings,
                 n_preemptible = n_preemptible_pulsar_step2,
                 allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
@@ -394,6 +398,7 @@ workflow parallel_spectronaut {
                     experiment_name = experiment_name,
                     analysis_schema = directDIA_settings,
                     enzyme_database = enzyme_database,
+                    custom_mod_repository = custom_mod_repository,
                     cpu = pulsar_step3_cpu,
                     ram_gb = pulsar_step3_ram_gb,
                     bin_index = i,
@@ -414,6 +419,7 @@ workflow parallel_spectronaut {
                 cpu = combine_archives_cpu,
                 ram_gb = combine_archives_ram_gb,
                 enzyme_database = enzyme_database,
+                custom_mod_repository = custom_mod_repository,
                 analysis_schema = directDIA_settings,
                 n_preemptible = n_preemptible_combine_archives,
                 allocated_disk_gb = ceil(finalized_total_size_gb * disk_size_multiplier),
@@ -441,6 +447,7 @@ workflow parallel_spectronaut {
                 user_spectral_libraries = select_all([spectral_library_1, spectral_library_2, spectral_library_3]),
                 analysis_schema = directDIA_settings,
                 enzyme_database = enzyme_database,
+                custom_mod_repository = custom_mod_repository,
                 cpu = dia_analysis_cpu,
                 ram_gb = dia_analysis_ram_gb,
                 bin_index = i,
@@ -466,6 +473,7 @@ workflow parallel_spectronaut {
             cpu = combine_sne_cpu,
             ram_gb = combine_sne_ram_gb,
             enzyme_database = enzyme_database,
+            custom_mod_repository = custom_mod_repository,
             n_preemptible = n_preemptible_combine_sne,
             allocated_disk_gb = ceil(finalized_total_size_gb * sne_combine_disk_size_multiplier),
             generate_sne_large_experiment = generate_sne_large_experiment,
@@ -643,9 +651,6 @@ task htrms_conversion {
         output_dir="${cromwell_root}/out_conversion"
         mkdir -p "${output_dir}"
 
-        tmp_dir="${cromwell_root}/sn_temp"
-        mkdir -p "${tmp_dir}"
-
         gcloud storage cp -r "~{input_file_path}" "${input_dir}/"
 
         # Run HTRMS conversion
@@ -654,7 +659,7 @@ task htrms_conversion {
             -i "${input_dir}" \
             -o "${output_dir}" \
             ~{if defined(convert_schema) then "-s " + convert_schema else ""} \
-            -setTemp "${tmp_dir}" 2>&1 | tee htrms_conversion.log
+            2>&1 | tee htrms_conversion.log
 
         # Find and move the converted file(s)
         htrms_count=$(find "${output_dir}" -type f -name "*.htrms" | wc -l)
@@ -704,6 +709,7 @@ task directDIA_single_vm {
         File? report_schema_4
         Boolean skip_pulsar
         Array[String] user_spectral_libraries
+        File? custom_mod_repository
     }
 
     # user_spectral_libraries are GCS URIs (.kit files) downloaded inside the command via
@@ -759,12 +765,6 @@ task directDIA_single_vm {
         file_count=$(find "${input_dir}" -type f | wc -l)
         echo "Downloaded ${file_count} files to input directory"
 
-        # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
-
         # Download user spectral libraries (if any) from GCS
         user_lib_dir="${cromwell_root}/user_libraries"
         mkdir -p "${user_lib_dir}"
@@ -782,7 +782,11 @@ task directDIA_single_vm {
         if [ "~{skip_pulsar}" = "true" ]; then
             # do_pulsar=false: use diaanalysis command with user-provided spectral libraries
             echo "Starting DIA analysis (do_pulsar=false)..."
-            spectronaut diaanalysis \
+            spectronaut \
+                -setTemp "${tmp_dir}" \
+                ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+                ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+                diaanalysis \
                 -s "~{analysis_schema}" \
                 ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
                 -fasta "~{fasta_1}" \
@@ -797,11 +801,15 @@ task directDIA_single_vm {
                 -o "${output_dir}" \
                 -d "${input_dir}" \
                 ${user_lib_args} \
-                -setTemp "${tmp_dir}" 2>&1 | tee spectronaut_single_vm.log
+                2>&1 | tee spectronaut_single_vm.log
         else
             # do_pulsar=true: use direct (DirectDIA), optionally with user spectral libraries
             echo "Starting directDIA search..."
-            spectronaut direct \
+            spectronaut \
+                -setTemp "${tmp_dir}" \
+                ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+                ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+                direct \
                 -s "~{analysis_schema}" \
                 ~{if defined(condition_setup) then "-con " + condition_setup else ""} \
                 -fasta "~{fasta_1}" \
@@ -816,7 +824,7 @@ task directDIA_single_vm {
                 -o "${output_dir}" \
                 -d "${input_dir}" \
                 ${user_lib_args} \
-                -setTemp "${tmp_dir}" 2>&1 | tee spectronaut_single_vm.log
+                2>&1 | tee spectronaut_single_vm.log
         fi
 
         # Create output archive
@@ -976,6 +984,7 @@ task pulsar_step1_binned {
         File? fasta_2
         File? fasta_3
         File? enzyme_database
+        File? custom_mod_repository
     }
 
     command <<<
@@ -1022,12 +1031,6 @@ task pulsar_step1_binned {
         file_count=$(find "${input_dir}" -type f | wc -l)
         echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
 
-        # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
-
         # Run Pulsar Step 1 on ALL files in the bin at once (batch processing)
         echo "Running Pulsar Step 1 for bin ~{bin_index} (batch processing ${file_count} files)..."
 
@@ -1050,15 +1053,19 @@ task pulsar_step1_binned {
         fi
 
         # Prepare command string for printing (back-tracing)
-        cmd_string="spectronaut lg -se Pulsar ${cmd_flags} -fasta ~{fasta_1} ~{if defined(
+        cmd_string="spectronaut -setTemp ${tmp_dir} ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} lg -se Pulsar ${cmd_flags} -fasta ~{fasta_1} ~{if defined(
              fasta_2) then "-fasta " + fasta_2 else ""} ~{if defined(fasta_3) then "-fasta "
              + fasta_3 else ""} -rs ~{analysis_schema} --pulsarStage pulsarStep1 -a ${output_dir}/search_archive_step1_bin_~{
-             bin_index}.psar -o ${output_dir} -setTemp ${tmp_dir}"
+             bin_index}.psar -o ${output_dir}"
 
         echo "Command being run:"
         echo "${cmd_string}"
 
-        spectronaut lg -se Pulsar \
+        spectronaut \
+            -setTemp "${tmp_dir}" \
+            ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+            ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+            lg -se Pulsar \
             ${cmd_flags} \
             -fasta "~{fasta_1}" \
             ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
@@ -1067,7 +1074,7 @@ task pulsar_step1_binned {
             --pulsarStage pulsarStep1 \
             -a "${output_dir}/search_archive_step1_bin_~{bin_index}.psar" \
             -o "${output_dir}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step1_bin_~{bin_index}.log
+            2>&1 | tee pulsar_step1_bin_~{bin_index}.log
 
         # Verify output and move to cromwell root
         psar_count=$(find "${output_dir}" -type f -name "*.psar" | wc -l)
@@ -1224,6 +1231,7 @@ task pulsar_step2_combine_models {
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
+        File? custom_mod_repository
     }
 
     command <<<
@@ -1266,22 +1274,20 @@ task pulsar_step2_combine_models {
         archive_count=$(find "${archives_dir}" -type f -name "*.psar" | wc -l)
         echo "Copied ${archive_count} intermediate archives"
 
-        # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
-
         # Run Pulsar Step 2 to generate .qsp optimized models
         echo "Running Pulsar Step 2 to generate optimized models from ${archive_count} archives..."
-        spectronaut lg -se Pulsar \
+        spectronaut \
+            -setTemp "${tmp_dir}" \
+            ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+            ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+            lg -se Pulsar \
             -sad "${archives_dir}" \
             --pulsarStage pulsarStep2 \
             -n "~{experiment_name}" \
             -rs "~{analysis_schema}" \
             --noOutputSubfolder \
             -o "${output_dir}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step2_combine.log
+            2>&1 | tee pulsar_step2_combine.log
 
         # Verify output and move to cromwell root
         qsp_count=$(find "${output_dir}" -type f -name "*.qsp" | wc -l)
@@ -1441,6 +1447,7 @@ task pulsar_step3_binned {
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
+        File? custom_mod_repository
     }
 
     command <<<
@@ -1484,12 +1491,6 @@ task pulsar_step3_binned {
         file_count=$(find "${input_dir}" -type f | wc -l)
         echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
 
-        # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
-
         # Run Pulsar Step 3 with optimized models (batch processing)
         echo "Running Pulsar Step 3 for bin ~{bin_index} with optimized models..."
 
@@ -1512,14 +1513,18 @@ task pulsar_step3_binned {
         fi
 
         # Prepare command string for printing (back-tracing)
-        cmd_string="spectronaut lg -se Pulsar ${cmd_flags} -sa ~{intermediate_archive} -a ${output_dir}/search_archive_bin_~{
+        cmd_string="spectronaut -setTemp ${tmp_dir} ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} lg -se Pulsar ${cmd_flags} -sa ~{intermediate_archive} -a ${output_dir}/search_archive_bin_~{
              bin_index}.psar --optimizedModels ~{optimized_models} --pulsarStage pulsarStep3 -o ${output_dir} -n ~{
-             experiment_name}_bin_~{bin_index} -rs ~{analysis_schema} -setTemp ${tmp_dir}"
+             experiment_name}_bin_~{bin_index} -rs ~{analysis_schema}"
 
         echo "Command being run:"
         echo "${cmd_string}"
 
-        spectronaut lg -se Pulsar \
+        spectronaut \
+            -setTemp "${tmp_dir}" \
+            ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+            ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+            lg -se Pulsar \
             ${cmd_flags} \
             -sa "~{intermediate_archive}" \
             -a "${output_dir}/search_archive_bin_~{bin_index}.psar" \
@@ -1528,7 +1533,7 @@ task pulsar_step3_binned {
             -o "${output_dir}" \
             -n "~{experiment_name}_bin_~{bin_index}" \
             -rs "~{analysis_schema}" \
-            -setTemp "${tmp_dir}" 2>&1 | tee pulsar_step3_bin_~{bin_index}.log
+            2>&1 | tee pulsar_step3_bin_~{bin_index}.log
 
         # Verify output and move to cromwell root
         psar_count=$(find "${output_dir}" -type f -name "*.psar" | wc -l)
@@ -1684,6 +1689,7 @@ task combine_final_archives {
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
+        File? custom_mod_repository
     }
 
     command <<<
@@ -1721,18 +1727,15 @@ task combine_final_archives {
             fi
         done < ~{write_lines(input_archives)}
 
-        # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
-
-        spectronaut lg -se Pulsar \
+        spectronaut \
+            -setTemp "${tmp_dir}" \
+            ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+            ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+            lg -se Pulsar \
             -sad "${work_archives}" \
             -k "${cromwell_root}/${merged_library}" \
             -o "${cromwell_root}" \
             -s "~{analysis_schema}" \
-            -setTemp "${tmp_dir}" \
             2>&1 | tee merge_archives.log
 
         if [ ! -f "${cromwell_root}/${merged_library}" ]; then
@@ -1888,6 +1891,7 @@ task dia_analysis_binned {
         Int allocated_disk_gb
         Int n_preemptible
         File? enzyme_database
+        File? custom_mod_repository
     }
 
     # user_spectral_libraries are GCS URIs (.kit files) downloaded inside the command via
@@ -1937,12 +1941,6 @@ task dia_analysis_binned {
             fi
         done < ~{write_lines(input_files)}
 
-        # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
-
         # Verify files were copied
         file_count=$(find "${input_dir}" -type f | wc -l)
         echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
@@ -1968,14 +1966,18 @@ task dia_analysis_binned {
 
         # Run DIA analysis on ALL files in bin at once (batch processing)
         echo "Running DIA analysis for bin ~{bin_index} (batch processing ${file_count} files)..."
-        spectronaut diaanalysis \
+        spectronaut \
+            -setTemp "${tmp_dir}" \
+            ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+            ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+            diaanalysis \
             -s "~{analysis_schema}" \
             -n "~{experiment_name}_bin_~{bin_index}" \
             -o "${output_dir}" \
             -d "${input_dir}" \
             ~{if defined(merged_archive) then "-a " + merged_archive else ""} \
             ${user_lib_args} \
-            -setTemp "${tmp_dir}" 2>&1 | tee dia_analysis_bin_~{bin_index}.log
+            2>&1 | tee dia_analysis_bin_~{bin_index}.log
 
         # Find all .sne files produced
         sne_count=$(find "${output_dir}" -type f -name "*.sne" | wc -l)
@@ -2138,6 +2140,7 @@ task combine_sne {
         File? report_schema_3
         File? report_schema_4
         File? enzyme_database
+        File? custom_mod_repository
         Boolean generate_sne_large_experiment
     }
 
@@ -2165,8 +2168,9 @@ task combine_sne {
 
         output_dir="${cromwell_root}/out_combine"
         output_zip="${cromwell_root}/spectronaut_output.zip"
+        tmp_dir="${cromwell_root}/sn_temp"
 
-        mkdir -p "${output_dir}"
+        mkdir -p "${output_dir}" "${tmp_dir}"
 
         sne_dir="${cromwell_root}/work_snes"
         mkdir -p "${sne_dir}"
@@ -2178,14 +2182,12 @@ task combine_sne {
             fi
         done < ~{write_lines(sne_files)}
 
-        # Import enzyme database if provided
-        if [ ~{defined(enzyme_database)} = true ]; then
-            echo "Importing enzyme database..."
-            dotnet SpectronautCMD.dll --importEnzymeDB "~{enzyme_database}"
-        fi
-
         if [ "~{generate_sne_large_experiment}" = "true" ]; then
-            spectronaut manageSNE --merge \
+            spectronaut \
+                -setTemp "${tmp_dir}" \
+                ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+                ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+                manageSNE --merge \
                 -n "~{experiment_name}" \
                 -o "${output_dir}" \
                 -d "${sne_dir}" \
@@ -2194,9 +2196,14 @@ task combine_sne {
                 ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
                 ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
                 ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
-                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} \
+                2>&1 | tee spectronaut_combine.log
         else
-            spectronaut combine \
+            spectronaut \
+                -setTemp "${tmp_dir}" \
+                ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
+                ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+                combine \
                 -n "~{experiment_name}" \
                 -o "${output_dir}" \
                 -d "${sne_dir}" \
@@ -2205,7 +2212,8 @@ task combine_sne {
                 ~{if defined(report_schema_1) then "-rs " + report_schema_1 else ""} \
                 ~{if defined(report_schema_2) then "-rs " + report_schema_2 else ""} \
                 ~{if defined(report_schema_3) then "-rs " + report_schema_3 else ""} \
-                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} 2>&1 | tee spectronaut_combine.log
+                ~{if defined(report_schema_4) then "-rs " + report_schema_4 else ""} \
+                2>&1 | tee spectronaut_combine.log
         fi
 
         echo "Creating output archive..."
