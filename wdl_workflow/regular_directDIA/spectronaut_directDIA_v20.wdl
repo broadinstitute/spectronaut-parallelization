@@ -175,8 +175,7 @@ task convert_htrms {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.4"
-        cpuPlatform: "AMD Rome"
+        docker: "broadcptacdev/panoply_spectronaut:v20.5"
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 32
@@ -218,7 +217,7 @@ task spectronaut {
     command <<<
         set -euo pipefail
 
-        echo "=== Spectronaut analysis task started (broadcptacdev/panoply_spectronaut:v20.4) ===" >&2
+        echo "=== Spectronaut analysis task started (broadcptacdev/panoply_spectronaut:v20.5) ===" >&2
         echo "directDIA mode: ~{if !defined(spectral_library) then "true" else "false"}" >&2
 
         cromwell_root=$(pwd)
@@ -265,7 +264,7 @@ task spectronaut {
 
         zip -r "${out_zip}" "${out_dir}" -x \*.zip
 
-        echo "=== Spectronaut search complete (broadcptacdev/panoply_spectronaut:v20.4) ===" >&2
+        echo "=== Spectronaut search complete (broadcptacdev/panoply_spectronaut:v20.5) ===" >&2
     >>>
 
     output {
@@ -273,8 +272,7 @@ task spectronaut {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.4"
-        cpuPlatform: "AMD Rome"
+        docker: "broadcptacdev/panoply_spectronaut:v20.5"
         memory: "~{ram_gb}GB"  # 896GB max for AMD Rome
         bootDiskSizeGb: 32
         disks: "local-disk ~{local_disk_gb} HDD"
