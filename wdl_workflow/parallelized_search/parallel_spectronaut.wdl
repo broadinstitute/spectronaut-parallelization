@@ -678,7 +678,7 @@ task htrms_conversion {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: 16
         memory: "32GB"
         bootDiskSizeGb: 32
@@ -961,7 +961,7 @@ task directDIA_single_vm {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -1211,7 +1211,7 @@ task pulsar_step1_binned {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -1424,7 +1424,7 @@ task pulsar_step2_combine_models {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -1670,7 +1670,7 @@ task pulsar_step3_binned {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -1868,7 +1868,7 @@ task combine_final_archives {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -2115,7 +2115,7 @@ task dia_analysis_binned {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
@@ -2349,7 +2349,7 @@ task combine_sne {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
