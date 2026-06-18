@@ -9,26 +9,28 @@ This repository contains WDL (Workflow Description Language) workflows and Docke
 ## Repository Structure
 
 ```
-panoply-workflow-dev/
+spectronaut-parallelization/
 ├── src/
 │   ├── docker/                          # Dockerfiles for Spectronaut images
 │   │   ├── spectronaut_v19.7.dockerfile
 │   │   ├── spectronaut_v20.3.dockerfile
 │   │   ├── spectronaut_v20.4.dockerfile
-│   │   └── spectronaut_v20.4_public.dockerfile
+│   │   ├── spectronaut_v20.5.dockerfile
+│   │   └── spectronaut_v21.0.dockerfile
 │   └── spectronaut-installer/           # Spectronaut .deb installers (Git LFS)
 │       ├── Spectronaut_19.7.250203.62635.deb
 │       ├── Spectronaut_20.1.250624.92449.deb
 │       ├── Spectronaut_20.2.250922.92449.deb
 │       ├── Spectronaut_20.3.251119.92449.deb
-│       └── Spectronaut_20.4.260109.92449.deb
+│       ├── Spectronaut_20.4.260109.92449.deb
+│       ├── Spectronaut_20.5.260227.92449.deb
+│       └── Spectronaut_21.0.260602.94842.deb
 ├── wdl_workflow/
-│   ├── parallelized_search/             # Main parallel workflows
-│   │   ├── parallel_spectronaut_private.wdl  # Hardcoded license (internal use)
-│   │   └── parallel_spectronaut_open.wdl     # Runtime license key (public use)
+│   ├── parallelized_search/             # Main parallel workflow
+│   │   └── parallel_spectronaut.wdl
 │   ├── regular_directDIA/               # Non-parallelized single-VM workflows
 │   │   ├── spectronaut_directDIA_v19.7.wdl
-│   │   └── spectronaut_directDIA_v20.4.wdl
+│   │   └── spectronaut_directDIA_v20.wdl
 │   └── spectronaut_modules/             # Standalone reusable modules
 │       └── sne_combine.wdl
 └── doc/                                 # Technical documentation and PDFs
@@ -38,42 +40,43 @@ panoply-workflow-dev/
 
 ## Docker Images
 
-| Dockerfile | Spectronaut Version | Image Tag | License |
-|------------|-------------------|-----------|---------|
-| `spectronaut_v19.7.dockerfile` | 19.7.250203.62635 | `broadcptacdev/panoply_spectronaut:v19.7` | Hardcoded at build |
-| `spectronaut_v20.3.dockerfile` | 20.3.251119.92449 | `broadcptacdev/panoply_spectronaut:v20.3` | Hardcoded at build |
-| `spectronaut_v20.4.dockerfile` | 20.4.260109.92449 | `broadcptacdev/panoply_spectronaut:v20.4` | Hardcoded at build |
-| `spectronaut_v20.4_public.dockerfile` | 20.4.260109.92449 | `broadcptacdev/panoply_spectronaut_public:v20.4` | None (activated at runtime) |
+| Dockerfile | Spectronaut Version | Image Tag |
+|------------|-------------------|-----------|
+| `spectronaut_v19.7.dockerfile` | 19.7.250203.62635 | `broadcptacdev/panoply_spectronaut:v19.7` |
+| `spectronaut_v20.3.dockerfile` | 20.3.251119.92449 | `broadcptacdev/panoply_spectronaut:v20.3` |
+| `spectronaut_v20.4.dockerfile` | 20.4.260109.92449 | `broadcptacdev/panoply_spectronaut:v20.4` |
+| `spectronaut_v20.5.dockerfile` | 20.5.260227.92449 | `broadcptacdev/panoply_spectronaut:v20.5` |
+| `spectronaut_v21.0.dockerfile` | 21.0.260602.94842 | `broadcptacdev/panoply_spectronaut:v21.0` |
 
-All images are based on `ubuntu:22.04` and include google-cloud-cli, dotnet-sdk-8.0, and Spectronaut installed via `.deb`.
+All images are based on `ubuntu:22.04` and include google-cloud-cli, dotnet-sdk-8.0, and Spectronaut installed via `.deb`. The license is hardcoded at build time.
 
-Build command (cross-compile from Apple Silicon):
+**Build context is the repository root** — Dockerfiles `COPY src/spectronaut-installer/...`, so build from the repo root with `-f`, not from the `src/docker/` directory:
 ```bash
-docker buildx build --platform linux/amd64 -f <dockerfile> -t <image_tag> .
+docker buildx build \
+  --platform linux/amd64 \
+  -t broadcptacdev/panoply_spectronaut:v21.0 \
+  -f src/docker/spectronaut_v21.0.dockerfile \
+  --push .
 ```
+The `--platform linux/amd64` flag is required when cross-compiling from Apple Silicon.
 
 ## Workflow Variants
 
-### 1. Parallelized Search (`wdl_workflow/parallelized_search/`)
+### 1. Parallelized Search (`wdl_workflow/parallelized_search/parallel_spectronaut.wdl`)
 
-The main production workflows. Both variants are functionally identical except for license handling:
-
-- **`parallel_spectronaut_private.wdl`** — License hardcoded in Docker image; no license input required. Uses `broadcptacdev/panoply_spectronaut:v20.4`.
-- **`parallel_spectronaut_open.wdl`** — Requires `spectronaut_license_key` String input. Uses `broadcptacdev/panoply_spectronaut_public:v20.4`. Every Spectronaut task runs `spectronaut activate "~{spectronaut_license_key}"` at the start.
-
-Both use `version development` WDL (required for `Directory` type support).
+The main production workflow. Uses `broadcptacdev/panoply_spectronaut:v21.0`. The license is hardcoded in the Docker image; no license-key input is required. Uses `version development` WDL (required for `Directory` type support).
 
 ### 2. Regular DirectDIA (`wdl_workflow/regular_directDIA/`)
 
 Single-VM non-parallelized workflows:
 - **`spectronaut_directDIA_v19.7.wdl`** — Uses `broadcptacdev/panoply_spectronaut:v19.7`
-- **`spectronaut_directDIA_v20.4.wdl`** — Uses `broadcptacdev/panoply_spectronaut:v20.4`
+- **`spectronaut_directDIA_v20.wdl`** — Uses `broadcptacdev/panoply_spectronaut:v20.5`
 
 Both use `version development` WDL. Flow: `list_files` → optional scatter(`convert_htrms` per file) → `spectronaut` (single VM search).
 
 ### 3. SNE Combine Module (`wdl_workflow/spectronaut_modules/sne_combine.wdl`)
 
-Standalone reusable module for combining SNE result files. Uses `version 1.0` WDL. Docker image: `broadcptacdev/panoply_spectronaut:v20.4`.
+Standalone reusable module for combining SNE result files. Uses `version 1.0` WDL. Docker image: `broadcptacdev/panoply_spectronaut:v20.5`.
 
 - **`produce_final_sne=true`** (default): `spectronaut manageSNE --merge` — generates final merged SNE with reports
 - **`produce_final_sne=false`**: `spectronaut combine` — combines SNE files without full report generation
@@ -113,18 +116,18 @@ Phase 5: Merge
 
 | Task | Docker Image | Function |
 |------|-------------|---------|
-| `validate_skip_pulsar` | `python:3.9-slim` | Validates do_pulsar + library configuration |
-| `list_files` | `google/cloud-sdk:slim` | Lists files in GCS directory |
+| `validate_skip_pulsar` | `ubuntu:22.04` | Validates do_pulsar + library configuration |
+| `list_files` | `gcr.io/google.com/cloudsdktool/cloud-sdk:stable` | Lists files in GCS directory |
 | `create_bins` | `python:3.9-slim` | Round-robin binning (max 80 VMs) |
 | `sum_floats` | `python:3.9-slim` | Sums HTRMS file sizes for disk allocation |
-| `htrms_conversion` | `broadcptacdev/panoply_spectronaut:v20.4` | Per-file raw → HTRMS conversion |
-| `directDIA_single_vm` | `broadcptacdev/panoply_spectronaut:v20.4` | Single-VM search (num_vms=1) |
-| `pulsar_step1_binned` | `broadcptacdev/panoply_spectronaut:v20.4` | Intermediate .psar per bin |
-| `pulsar_step2_combine_models` | `broadcptacdev/panoply_spectronaut:v20.4` | Train optimized .qsp models |
-| `pulsar_step3_binned` | `broadcptacdev/panoply_spectronaut:v20.4` | Final .psar per bin with optimized models |
-| `combine_final_archives` | `broadcptacdev/panoply_spectronaut:v20.4` | Merge archives → .kit library |
-| `dia_analysis_binned` | `broadcptacdev/panoply_spectronaut:v20.4` | DIA analysis per bin → .sne files |
-| `combine_sne` | `broadcptacdev/panoply_spectronaut:v20.4` | Merge SNE + reports → output.zip |
+| `htrms_conversion` | `broadcptacdev/panoply_spectronaut:v21.0` | Per-file raw → HTRMS conversion |
+| `directDIA_single_vm` | `broadcptacdev/panoply_spectronaut:v21.0` | Single-VM search (num_vms=1) |
+| `pulsar_step1_binned` | `broadcptacdev/panoply_spectronaut:v21.0` | Intermediate .psar per bin |
+| `pulsar_step2_combine_models` | `broadcptacdev/panoply_spectronaut:v21.0` | Train optimized .qsp models |
+| `pulsar_step3_binned` | `broadcptacdev/panoply_spectronaut:v21.0` | Final .psar per bin with optimized models |
+| `combine_final_archives` | `broadcptacdev/panoply_spectronaut:v21.0` | Merge archives → .kit library |
+| `dia_analysis_binned` | `broadcptacdev/panoply_spectronaut:v21.0` | DIA analysis per bin → .sne files |
+| `combine_sne` | `broadcptacdev/panoply_spectronaut:v21.0` | Merge SNE + reports → output.zip |
 
 ### Workflow Inputs
 
@@ -144,23 +147,24 @@ Phase 5: Merge
 - `disk_size_multiplier` (Float, default: 3.0): Multiplier for raw/HTRMS disk allocation
 - `sne_combine_disk_size_multiplier` (Float, default: 5.0): Multiplier for SNE combine disk
 - `generate_sne_large_experiment` (Boolean, default: false): Use `spectronaut combine` instead of `manageSNE --merge` for combine_sne
-- `enzyme_database` (File?): Custom enzyme database
+- `enzyme_database` (File?): Custom enzyme database (imported via `--importEnzymeDB`)
+- `custom_mod_repository` (File?): Custom modification repository (imported via `--importModRepository`)
 - `convert_schema` (File?): Schema for HTRMS conversion
 - `directDIA_settings` (File?): Settings for search archive generation
 - `DIA_analysis_settings` (File?): Settings for DIA analysis
 - `condition_setup` (File?): Condition setup file
 - `report_schema_1` through `report_schema_4` (File?): Report schema files
 - `json_settings` (File?): JSON settings file
-- `spectronaut_license_key` (String): **open variant only** — Spectronaut license key
 
-**Preemptible settings** (all Int, default: 0):
-- `n_preemptible_htrms_conversion`
-- `n_preemptible_pulsar_step1`
-- `n_preemptible_pulsar_step2`
-- `n_preemptible_pulsar_step3`
-- `n_preemptible_combine_archives`
-- `n_preemptible_dia_analysis`
-- `n_preemptible_combine_sne`
+**Preemptible settings** (all Int; defaults shown):
+- `n_preemptible_htrms_conversion` (default: 2)
+- `n_preemptible_pulsar_step1` (default: 1)
+- `n_preemptible_pulsar_step2` (default: 0)
+- `n_preemptible_pulsar_step3` (default: 1)
+- `n_preemptible_directDIA_single_vm` (default: 0)
+- `n_preemptible_combine_archives` (default: 0)
+- `n_preemptible_dia_analysis` (default: 1)
+- `n_preemptible_combine_sne` (default: 0)
 
 ### Resource Presets by `experiment_type`
 
@@ -186,6 +190,17 @@ All dynamic RAM values have a floor of 64 GB and a cap of 750 GB.
 - Uses `mktemp -d` within Cromwell execution directory to avoid root filesystem space issues
 - Pattern: `cromwell_root=$(pwd)` → `sn_temp=$(mktemp -d sn_temp_XXXXXX)` → `working_dir=$(mktemp -d working_dir_XXXXXX)`
 
+**Input Localization — `localizationOptional` (Cromwell-specific):**
+Tasks that receive raw input data paths (`directDIA_single_vm`, `pulsar_step1_binned`, `pulsar_step3_binned`, `dia_analysis_binned`) and GCS resources (`htrms_conversion` input, `user_spectral_libraries`) declare those inputs as `String`/`Array[String]` and download them **inside the command** with `gcloud storage cp -r`, rather than letting Cromwell localize them as `File`:
+```wdl
+parameter_meta {
+    input_files: { localizationOptional: true }
+}
+```
+- **Why required:** timsTOF `.d` inputs are **directories** (GCS prefixes), not single objects. Cromwell's `File` localizer cannot localize a directory, so declaring these as `Array[File]` fails with "cannot find files" when `do_conversion=false`. `gcloud storage cp -r` handles both `.d` directories and `.htrms` files.
+- **Caveat — NOT portable WDL.** `parameter_meta` is standard (and accepts arbitrary keys, so this parses everywhere), but the `localizationOptional` *key* is a **Cromwell convention**, honored only on Cromwell/Terra. The WDL 1.2 spec standardizes this differently as a `localization_optional` task **hint** (snake_case, in a `hints {}` section). Since download happens in-command regardless, ignoring the key on a non-Cromwell engine is harmless here.
+- Inputs flow as GCS path strings end-to-end: `list_files` → `create_bins` (`bins_json`) → search tasks. When `do_conversion=true`, `htrms_conversion` outputs are Cromwell `File`s whose serialized values are `gs://` paths, so `gcloud storage cp -r` works for them too.
+
 **Dynamic Disk Sizing:**
 - `htrms_conversion`: `ceil(file_size_gb * disk_size_multiplier)`
 - Downstream tasks: propagate measured file sizes from `sum_floats`
@@ -195,10 +210,11 @@ All dynamic RAM values have a floor of 64 GB and a cap of 750 GB.
 - Every task emits a resource usage report at completion via cgroup v1/v2 (CPU, memory, disk)
 - Pattern: reads `/sys/fs/cgroup/memory.peak` or `/sys/fs/cgroup/memory/memory.max_usage_in_bytes`
 
-**Enzyme Database Import:**
-Custom enzyme databases require a separate import step before search:
-```bash
-dotnet /usr/lib/spectronaut/SpectronautCMD.dll --importEnzymeDB <database>
+**Enzyme Database & Modification Repository Import:**
+Custom enzyme databases and modification repositories are imported inline as flags on the Spectronaut command (prepended before the action), gated by `defined()`:
+```
+~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""}
+~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""}
 ```
 
 **HTRMS Condition Setup:**
@@ -297,7 +313,7 @@ spectronaut \
 
 | Workflow | WDL Version | Reason |
 |----------|------------|--------|
-| `parallel_spectronaut_*.wdl` | `development` | Requires `Directory` type |
+| `parallel_spectronaut.wdl` | `development` | Requires `Directory` type |
 | `spectronaut_directDIA_*.wdl` | `development` | Requires `Directory` type |
 | `sne_combine.wdl` | `1.0` | No `Directory` type needed |
 
