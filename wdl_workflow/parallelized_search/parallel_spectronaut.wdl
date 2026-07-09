@@ -1641,23 +1641,14 @@ task dia_analysis_binned {
         set -euo pipefail
 
         cromwell_root=$(pwd)
+        # shellcheck source=/dev/null
+        source /usr/local/bin/sn_resource_monitor.sh
+        # shellcheck source=/dev/null
+        source /usr/local/bin/sn_download.sh
+        # shellcheck source=/dev/null
+        source /usr/local/bin/sn_import_flags.sh
 
-        # Resource Monitoring Initialization
-        wall_start=$(date +%s%N)  # Nanoseconds since epoch
-
-        # Cgroup V2 (modern)
-        if [ -f /sys/fs/cgroup/cpu.stat ]; then
-            cpu_start=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
-            cpu_start_ns=$((cpu_start * 1000))  # Convert microseconds to nanoseconds
-        # Cgroup V1 (legacy)
-        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
-            cpu_start_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
-        else
-            cpu_start_ns=0
-        fi
-
-        # Capture per-CPU stats from /proc/stat
-        cpu_stat_start=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
+        sn_monitor_start
 
         input_dir="${cromwell_root}/work_input"
         mkdir -p "${input_dir}"
@@ -1670,30 +1661,12 @@ task dia_analysis_binned {
 
         # Download all input files from GCS to input directory.
         # gcloud storage cp -r handles both timsTOF .d directories and .htrms files.
-        echo "Downloading input files..."
-        while IFS= read -r input_file; do
-            if [ -n "${input_file}" ]; then
-                echo "Downloading: ${input_file}"
-                gcloud storage cp -r "${input_file}" "${input_dir}/"
-            fi
-        done < ~{write_lines(input_files)}
-
-        # Verify files were downloaded
+        sn_download_inputs "${input_dir}" ~{write_lines(input_files)}
         file_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 | wc -l)
-        echo "Downloaded ${file_count} input item(s) to input directory for bin ~{bin_index}"
 
         # Download user-provided spectral libraries from GCS
         user_lib_dir="${cromwell_root}/user_libraries"
-        mkdir -p "${user_lib_dir}"
-        user_lib_args=""
-        while IFS= read -r lib_path; do
-            if [ -n "${lib_path}" ]; then
-                echo "Downloading user spectral library: ${lib_path}"
-                gcloud storage cp -r "${lib_path}" "${user_lib_dir}/"
-                local_lib="${user_lib_dir}/$(basename "${lib_path}")"
-                user_lib_args="${user_lib_args} -a ${local_lib}"
-            fi
-        done < ~{write_lines(user_spectral_libraries)}
+        user_lib_args="$(sn_download_libraries "${user_lib_dir}" ~{write_lines(user_spectral_libraries)})"
 
         # Validate that at least one spectral library is available
         if [ "~{defined(merged_archive)}" = "false" ] && [ -z "${user_lib_args}" ]; then
@@ -1701,12 +1674,15 @@ task dia_analysis_binned {
             exit 1
         fi
 
+        export ENZYME_DB="~{if defined(enzyme_database) then enzyme_database else ''}"
+        export MOD_REPO="~{if defined(custom_mod_repository) then custom_mod_repository else ''}"
+        import_flags="$(sn_build_import_flags)"
+
         # Run DIA analysis on ALL files in bin at once (batch processing)
         echo "Running DIA analysis for bin ~{bin_index} (batch processing ${file_count} files)..."
         spectronaut \
             -setTemp "${tmp_dir}" \
-            ~{if defined(enzyme_database) then "--importEnzymeDB " + enzyme_database else ""} \
-            ~{if defined(custom_mod_repository) then "--importModRepository " + custom_mod_repository else ""} \
+            ${import_flags} \
             diaanalysis \
             -s "~{analysis_schema}" \
             -n "~{experiment_name}_bin_~{bin_index}" \
@@ -1729,122 +1705,7 @@ task dia_analysis_binned {
 
         echo "DIA analysis complete for bin ~{bin_index}. Generated ${sne_count} SNE files."
 
-        # ============================================================================
-        # Resource Usage Report
-        # ============================================================================
-        echo "==========================================="
-        echo "=== RESOURCE USAGE REPORT ==="
-        echo "==========================================="
-
-        # --- CPU Utilization ---
-        echo ""
-        echo "--- CPU Utilization ---"
-
-        wall_end=$(date +%s%N)
-        wall_elapsed_ns=$((wall_end - wall_start))
-
-        # Cgroup V2
-        if [ -f /sys/fs/cgroup/cpu.stat ]; then
-            cpu_end=$(grep "usage_usec" /sys/fs/cgroup/cpu.stat | awk '{print $2}')
-            cpu_end_ns=$((cpu_end * 1000))
-        # Cgroup V1
-        elif [ -f /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
-            cpu_end_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage)
-        else
-            cpu_end_ns=0
-        fi
-
-        cpu_stat_end=$(grep "^cpu[0-9]" /proc/stat 2>/dev/null || true)
-
-        if [ "$cpu_start_ns" -gt 0 ] && [ "$cpu_end_ns" -gt "$cpu_start_ns" ] && [ "$wall_elapsed_ns" -gt 0 ]; then
-            cpu_used_ns=$((cpu_end_ns - cpu_start_ns))
-            cpu_utilization_total=$(awk -v cpu="$cpu_used_ns" -v wall="$wall_elapsed_ns" \
-                'BEGIN { printf "%.2f", (cpu / wall) * 100 }')
-            allocated_cpus=~{cpu}
-            cpu_utilization_per_core=$(awk -v total="$cpu_utilization_total" -v cpus="$allocated_cpus" \
-                'BEGIN { printf "%.2f", total / cpus }')
-
-            echo "Allocated CPUs: ${allocated_cpus}"
-            echo "Average CPU Utilization: ${cpu_utilization_total}% (across all cores)"
-
-            if [ -n "$cpu_stat_start" ] && [ -n "$cpu_stat_end" ]; then
-                max_core_util=$(paste \
-                    <(echo "$cpu_stat_start" | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
-                    <(echo "$cpu_stat_end"   | awk '{idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total}') \
-                    | awk '{
-                        idle_start=$1; total_start=$2; idle_end=$3; total_end=$4;
-                        d_total = total_end - total_start;
-                        d_idle  = idle_end  - idle_start;
-                        if (d_total > 0) util = (1 - d_idle/d_total) * 100; else util = 0;
-                        if (util > max) max = util;
-                      } END { printf "%.2f", max }')
-                echo "Max Per-Core CPU Utilization: ${max_core_util}%"
-            fi
-
-            echo "Per-Core CPU Utilization: ${cpu_utilization_per_core}%"
-            echo "Maximum Possible: $((allocated_cpus * 100))% (${allocated_cpus} cores at 100%)"
-        else
-            echo "CPU utilization data not available"
-        fi
-
-        # --- Memory Usage ---
-        echo ""
-        echo "--- Memory Usage ---"
-
-        # Cgroup V2
-        if [ -f /sys/fs/cgroup/memory.peak ]; then
-            max_mem_bytes=$(cat /sys/fs/cgroup/memory.peak)
-            limit_bytes=$(cat /sys/fs/cgroup/memory.max)
-        # Cgroup V1
-        elif [ -f /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]; then
-            max_mem_bytes=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes)
-            limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
-        else
-            max_mem_bytes=0
-            limit_bytes=0
-        fi
-
-        if [ "$max_mem_bytes" -gt 0 ]; then
-            max_mem_gb=$(awk -v val="$max_mem_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
-            echo "Actual Peak RAM: ${max_mem_gb} GB"
-
-            if [ "$limit_bytes" != "max" ] && [ "$limit_bytes" -gt 0 ]; then
-                limit_gb=$(awk -v val="$limit_bytes" 'BEGIN { printf "%.2f", val / (1024^3) }')
-                usage_percent=$(awk -v max="$max_mem_bytes" -v lim="$limit_bytes" \
-                    'BEGIN { printf "%.2f", (max / lim) * 100 }')
-                echo "RAM Limit: ${limit_gb} GB"
-                echo "RAM Usage: ${usage_percent}%"
-            fi
-        else
-            echo "Memory usage data not available"
-        fi
-
-        # --- Disk Usage ---
-        echo ""
-        echo "--- Disk Usage ---"
-
-        allocated_disk_gb=~{allocated_disk_gb}
-        echo "Disk Size Assigned: ${allocated_disk_gb} GB"
-
-        if command -v df >/dev/null 2>&1; then
-            disk_used_output=$(df -BG "${cromwell_root}" 2>/dev/null | tail -1 | awk '{print $3}')
-
-            if [ -n "${disk_used_output}" ]; then
-                disk_used_gb=$(echo "${disk_used_output}" | sed 's/G$//')
-                disk_usage_percent=$(awk -v used="$disk_used_gb" -v alloc="$allocated_disk_gb" \
-                    'BEGIN { printf "%.2f", (used / alloc) * 100 }')
-
-                echo "Final Disk Used: ${disk_used_gb} GB"
-                echo "Disk Usage: ${disk_usage_percent}%"
-            else
-                echo "Could not measure disk usage"
-            fi
-        else
-            echo "df command not available"
-        fi
-
-        echo ""
-        echo "==========================================="
+        sn_monitor_report ~{cpu} ~{allocated_disk_gb} "${cromwell_root}"
     >>>
 
     output {
