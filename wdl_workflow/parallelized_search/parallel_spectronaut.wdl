@@ -1039,8 +1039,8 @@ task pulsar_step1_binned {
             cmd_flags="-d ${input_dir}"
         fi
 
-        export ENZYME_DB="~{default='' enzyme_database}"
-        export MOD_REPO="~{default='' custom_mod_repository}"
+        export ENZYME_DB="~{if defined(enzyme_database) then enzyme_database else ''}"
+        export MOD_REPO="~{if defined(custom_mod_repository) then custom_mod_repository else ''}"
         import_flags="$(sn_build_import_flags)"
 
         spectronaut \
