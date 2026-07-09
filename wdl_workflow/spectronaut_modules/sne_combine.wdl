@@ -23,6 +23,8 @@ workflow sne_combine {
     }
 
     Int combine_sne_cpu = 64
+    # Shared RAM ceiling (conservative against Compute Engine machine-type limits)
+    Int combine_sne_ram_cap_gb = 700
     # RAM per GB of SNE data — manageSNE --merge mode (produce_final_sne=true)
     Float combine_sne_ram_per_gb_merge = 3.0
     # RAM per GB of SNE data — spectronaut combine mode (produce_final_sne=false)
@@ -33,10 +35,10 @@ workflow sne_combine {
             sne_directory = sne_directory,
     }
 
-    # RAM: scale with total SNE size, select rate based on mode (floor 64 GB, cap 700 GB)
+    # RAM: scale with total SNE size, select rate based on mode (floor 64 GB, cap combine_sne_ram_cap_gb)
     Float combine_sne_ram_per_gb = if produce_final_sne then combine_sne_ram_per_gb_merge else combine_sne_ram_per_gb_combine
-    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb) > 700
-                             then 700
+    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb) > combine_sne_ram_cap_gb
+                             then combine_sne_ram_cap_gb
                              else if ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb) > 64
                                  then ceil(combine_sne_ram_per_gb * measure_sne_size.total_sne_size_gb)
                                  else 64

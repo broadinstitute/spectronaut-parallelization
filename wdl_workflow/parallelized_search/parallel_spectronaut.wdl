@@ -270,22 +270,26 @@ workflow parallel_spectronaut {
         total_input_size_gb,
     ])
 
-    # Compute non-parallelized task RAM based on total file count (floor of 128 GB, capped at 750 GB)
-    Int pulsar_step2_ram_gb = if (ceil(pulsar_step2_base_ram_per_file * list_files.num_files) > 750)
-        then 750
+    # Shared RAM ceiling for dynamically-sized non-parallelized tasks (conservative
+    # against Compute Engine machine-type limits)
+    Int dynamic_ram_cap_gb = 700
+
+    # Compute non-parallelized task RAM based on total file count (floor of 128 GB, capped at dynamic_ram_cap_gb)
+    Int pulsar_step2_ram_gb = if (ceil(pulsar_step2_base_ram_per_file * list_files.num_files) > dynamic_ram_cap_gb)
+        then dynamic_ram_cap_gb
         else if (ceil(pulsar_step2_base_ram_per_file * list_files.num_files) > 128)
             then ceil(pulsar_step2_base_ram_per_file * list_files.num_files)
             else 128
 
-    Int combine_archives_ram_gb = if (ceil(combine_archives_base_ram_per_file * list_files.num_files) > 750)
-        then 750
+    Int combine_archives_ram_gb = if (ceil(combine_archives_base_ram_per_file * list_files.num_files) > dynamic_ram_cap_gb)
+        then dynamic_ram_cap_gb
         else if (ceil(combine_archives_base_ram_per_file * list_files.num_files) > 128)
             then ceil(combine_archives_base_ram_per_file * list_files.num_files)
             else 128
 
     Float combine_sne_ram_per_file = if generate_sne_large_experiment then combine_sne_ram_per_file_merge else combine_sne_ram_per_file_combine
-    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_file * list_files.num_files) > 700
-        then 700
+    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_file * list_files.num_files) > dynamic_ram_cap_gb
+        then dynamic_ram_cap_gb
         else if ceil(combine_sne_ram_per_file * list_files.num_files) > 64
             then ceil(combine_sne_ram_per_file * list_files.num_files)
             else 64
