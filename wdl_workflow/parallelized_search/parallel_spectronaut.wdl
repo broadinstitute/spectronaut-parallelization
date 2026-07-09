@@ -284,8 +284,8 @@ workflow parallel_spectronaut {
             else 128
 
     Float combine_sne_ram_per_file = if generate_sne_large_experiment then combine_sne_ram_per_file_merge else combine_sne_ram_per_file_combine
-    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_file * list_files.num_files) > 750
-        then 750
+    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_file * list_files.num_files) > 700
+        then 700
         else if ceil(combine_sne_ram_per_file * list_files.num_files) > 64
             then ceil(combine_sne_ram_per_file * list_files.num_files)
             else 64
