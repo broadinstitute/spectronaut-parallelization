@@ -49,7 +49,10 @@ sn_download_libraries() {
     while IFS= read -r lib_path; do
         if [ -n "${lib_path}" ]; then
             echo "Downloading user spectral library: ${lib_path}" >&2
-            gcloud storage cp -r "${lib_path}" "${dest}/" >&2
+            if ! gcloud storage cp -r "${lib_path}" "${dest}/" >&2; then
+                echo "ERROR: failed to download spectral library: ${lib_path}" >&2
+                return 1
+            fi
             lib_args="${lib_args} -a ${dest}/$(basename "${lib_path}")"
         fi
     done < "${paths}"
