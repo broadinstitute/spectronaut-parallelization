@@ -284,8 +284,8 @@ workflow parallel_spectronaut {
             else 128
 
     Float combine_sne_ram_per_file = if generate_sne_large_experiment then combine_sne_ram_per_file_merge else combine_sne_ram_per_file_combine
-    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_file * list_files.num_files) > 750
-        then 750
+    Int combine_sne_ram_gb = if ceil(combine_sne_ram_per_file * list_files.num_files) > 700
+        then 700
         else if ceil(combine_sne_ram_per_file * list_files.num_files) > 64
             then ceil(combine_sne_ram_per_file * list_files.num_files)
             else 64
@@ -692,7 +692,7 @@ task directDIA_single_vm {
     input {
         File fasta_1
         File analysis_schema
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
@@ -712,10 +712,13 @@ task directDIA_single_vm {
         File? custom_mod_repository
     }
 
-    # user_spectral_libraries are GCS URIs (.kit files) downloaded inside the command via
-    # gcloud storage cp. Marking them localizationOptional prevents Cromwell from attempting
-    # to localize them as Files, while still including their values in the cache-key hash.
+    # input_files are GCS URIs (raw .d directories or converted .htrms files) and
+    # user_spectral_libraries are GCS URIs (.kit files); both are downloaded inside the command
+    # via gcloud storage cp -r. Marking them localizationOptional prevents Cromwell from
+    # attempting to localize them as Files — which fails for timsTOF .d directories — while
+    # still including their values in the call-caching hash key.
     parameter_meta {
+        input_files: { localizationOptional: true }
         user_spectral_libraries: { localizationOptional: true }
     }
 
@@ -752,18 +755,19 @@ task directDIA_single_vm {
 
         output_zip="${cromwell_root}/spectronaut_output.zip"
 
-        # Copy all input files (already localized by Cromwell) to input directory
-        echo "Copying input files to input directory..."
+        # Download all input files from GCS to input directory.
+        # gcloud storage cp -r handles both timsTOF .d directories and .htrms files.
+        echo "Downloading input files to input directory..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                echo "Copying: ${input_file}"
-                cp "${input_file}" "${input_dir}/"
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
-        # Verify files were copied
-        file_count=$(find "${input_dir}" -type f | wc -l)
-        echo "Downloaded ${file_count} files to input directory"
+        # Verify files were downloaded
+        file_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 | wc -l)
+        echo "Downloaded ${file_count} input item(s) to input directory"
 
         # Download user spectral libraries (if any) from GCS
         user_lib_dir="${cromwell_root}/user_libraries"
@@ -975,7 +979,7 @@ task pulsar_step1_binned {
     input {
         File fasta_1
         File analysis_schema
-        Array[File] input_files
+        Array[String] input_files
         Int cpu
         Int ram_gb
         Int bin_index
@@ -985,6 +989,14 @@ task pulsar_step1_binned {
         File? fasta_3
         File? enzyme_database
         File? custom_mod_repository
+    }
+
+    # input_files are GCS URIs (raw .d directories or converted .htrms files) downloaded
+    # inside the command via gcloud storage cp -r. Marking them localizationOptional prevents
+    # Cromwell from attempting to localize them as Files — which fails for timsTOF .d
+    # directories — while still including their values in the call-caching hash key.
+    parameter_meta {
+        input_files: { localizationOptional: true }
     }
 
     command <<<
@@ -1018,18 +1030,19 @@ task pulsar_step1_binned {
         tmp_dir="${cromwell_root}/sn_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy ALL binned files (already localized by Cromwell) to input directory
-        echo "Copying all input files for bin ~{bin_index}..."
+        # Download ALL binned files from GCS to input directory.
+        # gcloud storage cp -r handles both timsTOF .d directories and .htrms files.
+        echo "Downloading all input files for bin ~{bin_index}..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                echo "Copying: ${input_file}"
-                cp "${input_file}" "${input_dir}/"
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
-        # Verify files were copied
-        file_count=$(find "${input_dir}" -type f | wc -l)
-        echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
+        # Verify files were downloaded
+        file_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 | wc -l)
+        echo "Downloaded ${file_count} input item(s) to input directory for bin ~{bin_index}"
 
         # Run Pulsar Step 1 on ALL files in the bin at once (batch processing)
         echo "Running Pulsar Step 1 for bin ~{bin_index} (batch processing ${file_count} files)..."
@@ -1039,11 +1052,12 @@ task pulsar_step1_binned {
         ls -1 "${input_dir}"
 
         # Construct input flags based on actual file type:
-        # HTRMS files require -r per file; raw files use -d directory
-        first_file=$(find "${input_dir}" -type f | head -1)
-        if [[ "${first_file}" == *.htrms ]]; then
+        # HTRMS files require -r per file; raw files (incl. timsTOF .d directories) use -d directory.
+        # Detect HTRMS by top-level .htrms entries so that files inside a .d directory are ignored.
+        htrms_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 -name "*.htrms" | wc -l)
+        if [ "${htrms_count}" -gt 0 ]; then
             cmd_flags=""
-            for f in "${input_dir}"/*; do
+            for f in "${input_dir}"/*.htrms; do
                  if [ -f "$f" ]; then
                     cmd_flags="${cmd_flags} -r $f"
                  fi
@@ -1439,7 +1453,7 @@ task pulsar_step3_binned {
         File intermediate_archive
         File optimized_models
         File analysis_schema
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
@@ -1448,6 +1462,14 @@ task pulsar_step3_binned {
         Int n_preemptible
         File? enzyme_database
         File? custom_mod_repository
+    }
+
+    # input_files are GCS URIs (raw .d directories or converted .htrms files) downloaded
+    # inside the command via gcloud storage cp -r. Marking them localizationOptional prevents
+    # Cromwell from attempting to localize them as Files — which fails for timsTOF .d
+    # directories — while still including their values in the call-caching hash key.
+    parameter_meta {
+        input_files: { localizationOptional: true }
     }
 
     command <<<
@@ -1478,18 +1500,19 @@ task pulsar_step3_binned {
 
         mkdir -p "${input_dir}" "${output_dir}" "${tmp_dir}"
 
-        # Copy ALL binned files (already localized by Cromwell) to input_dir
-        echo "Copying input files for bin ~{bin_index}..."
+        # Download ALL binned files from GCS to input_dir.
+        # gcloud storage cp -r handles both timsTOF .d directories and .htrms files.
+        echo "Downloading input files for bin ~{bin_index}..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                echo "Copying: ${input_file}"
-                cp "${input_file}" "${input_dir}/"
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
-        # Verify files were copied
-        file_count=$(find "${input_dir}" -type f | wc -l)
-        echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
+        # Verify files were downloaded
+        file_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 | wc -l)
+        echo "Downloaded ${file_count} input item(s) to input directory for bin ~{bin_index}"
 
         # Run Pulsar Step 3 with optimized models (batch processing)
         echo "Running Pulsar Step 3 for bin ~{bin_index} with optimized models..."
@@ -1499,11 +1522,12 @@ task pulsar_step3_binned {
         ls -1 "${input_dir}"
 
         # Construct input flags based on actual file type:
-        # HTRMS files require -r per file; raw files use -d directory
-        first_file=$(find "${input_dir}" -type f | head -1)
-        if [[ "${first_file}" == *.htrms ]]; then
+        # HTRMS files require -r per file; raw files (incl. timsTOF .d directories) use -d directory.
+        # Detect HTRMS by top-level .htrms entries so that files inside a .d directory are ignored.
+        htrms_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 -name "*.htrms" | wc -l)
+        if [ "${htrms_count}" -gt 0 ]; then
             cmd_flags=""
-            for f in "${input_dir}"/*; do
+            for f in "${input_dir}"/*.htrms; do
                  if [ -f "$f" ]; then
                     cmd_flags="${cmd_flags} -r $f"
                  fi
@@ -1883,7 +1907,7 @@ task dia_analysis_binned {
         File? merged_archive
         Array[String] user_spectral_libraries
         File analysis_schema
-        Array[File] input_files
+        Array[String] input_files
         String experiment_name
         Int cpu
         Int ram_gb
@@ -1894,10 +1918,13 @@ task dia_analysis_binned {
         File? custom_mod_repository
     }
 
-    # user_spectral_libraries are GCS URIs (.kit files) downloaded inside the command via
-    # gcloud storage cp. Marking them localizationOptional prevents Cromwell from attempting
-    # to localize them as Files, while still including their values in the cache-key hash.
+    # input_files are GCS URIs (raw .d directories or converted .htrms files) and
+    # user_spectral_libraries are GCS URIs (.kit files); both are downloaded inside the command
+    # via gcloud storage cp -r. Marking them localizationOptional prevents Cromwell from
+    # attempting to localize them as Files — which fails for timsTOF .d directories — while
+    # still including their values in the call-caching hash key.
     parameter_meta {
+        input_files: { localizationOptional: true }
         user_spectral_libraries: { localizationOptional: true }
     }
 
@@ -1932,18 +1959,19 @@ task dia_analysis_binned {
         tmp_dir="${cromwell_root}/work_dia_temp"
         mkdir -p "${tmp_dir}"
 
-        # Copy all input files (already localized by Cromwell) to input directory
-        echo "Copying input files..."
+        # Download all input files from GCS to input directory.
+        # gcloud storage cp -r handles both timsTOF .d directories and .htrms files.
+        echo "Downloading input files..."
         while IFS= read -r input_file; do
             if [ -n "${input_file}" ]; then
-                echo "Copying: ${input_file}"
-                cp "${input_file}" "${input_dir}/"
+                echo "Downloading: ${input_file}"
+                gcloud storage cp -r "${input_file}" "${input_dir}/"
             fi
         done < ~{write_lines(input_files)}
 
-        # Verify files were copied
-        file_count=$(find "${input_dir}" -type f | wc -l)
-        echo "Copied ${file_count} files to input directory for bin ~{bin_index}"
+        # Verify files were downloaded
+        file_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 | wc -l)
+        echo "Downloaded ${file_count} input item(s) to input directory for bin ~{bin_index}"
 
         # Download user-provided spectral libraries from GCS
         user_lib_dir="${cromwell_root}/user_libraries"

@@ -22,7 +22,7 @@ workflow sne_combine {
         File? enzyme_database
     }
 
-    Int combine_sne_cpu = 28
+    Int combine_sne_cpu = 64
     # RAM per GB of SNE data — manageSNE --merge mode (produce_final_sne=true)
     Float combine_sne_ram_per_gb_merge = 3.0
     # RAM per GB of SNE data — spectronaut combine mode (produce_final_sne=false)
@@ -291,7 +291,7 @@ task combine_sne {
     }
 
     runtime {
-        docker: "broadcptacdev/panoply_spectronaut:v20.5"
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
         cpu: cpu
         memory: "~{ram_gb}GB"
         bootDiskSizeGb: 32
