@@ -50,4 +50,26 @@ if sn_download_inputs "${workdir}/in2" "${workdir}/paths.txt" 2>/dev/null; then
     exit 1
 fi
 
-echo "PASS: sn_download parallel download + loud count assertion"
+# Fallback path: fake gcloud whose `cp --help` does NOT advertise --read-paths-from-stdin,
+# so sn_download_inputs must fall back to the portable per-file loop. Each `cp` invocation
+# receives exactly one source path as a positional arg (not via stdin).
+cat > "${workdir}/gcloud" <<'FAKE'
+#!/usr/bin/env bash
+if [ "$1" = "storage" ] && [ "$2" = "cp" ] && [ "$3" = "--help" ]; then
+    echo "usage: gcloud storage cp SOURCE... DESTINATION"
+    exit 0
+fi
+# storage cp -r <src> <dest>/   (one source per invocation, positional args only)
+src="$4"
+dest="$5"
+mkdir -p "${dest}"
+touch "${dest}/$(basename "${src}")"
+echo "fake gcloud (fallback) copied 1 item" >&2
+exit 0
+FAKE
+chmod +x "${workdir}/gcloud"
+sn_download_inputs "${workdir}/in3" "${workdir}/paths.txt"
+got=$(find "${workdir}/in3" -mindepth 1 -maxdepth 1 | wc -l)
+[ "${got}" -eq 3 ] || { echo "FAIL: expected 3 downloaded via fallback, got ${got}" >&2; exit 1; }
+
+echo "PASS: sn_download parallel download + loud count assertion + portable fallback"

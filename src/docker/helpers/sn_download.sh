@@ -22,10 +22,12 @@ sn_download_inputs() {
     if gcloud storage cp --help 2>/dev/null | grep -q -- '--read-paths-from-stdin'; then
         gcloud storage cp -r --read-paths-from-stdin "${dest}/" < "${paths}"
     else
-        # Fallback for older gcloud: xargs batches sources across a few cp calls.
-        grep -v '^[[:space:]]*$' "${paths}" | xargs -r -d '\n' -I{} echo {} \
-            | gcloud storage cp -r -I "${dest}/" 2>/dev/null \
-            || xargs -r -d '\n' gcloud storage cp -r "${dest}/" < "${paths}"
+        # Fallback for older gcloud that lacks --read-paths-from-stdin: a portable
+        # per-file loop (serial, but correct on both GNU and BSD/macOS shells).
+        while IFS= read -r src; do
+            [ -n "${src}" ] || continue
+            gcloud storage cp -r "${src}" "${dest}/"
+        done < "${paths}"
     fi
 
     local actual
