@@ -11,19 +11,9 @@ This repository contains WDL (Workflow Description Language) workflows and Docke
 ```
 spectronaut-parallelization/
 ├── src/
-│   ├── docker/                          # Dockerfiles for Spectronaut images
-│   │   ├── spectronaut_v19.7.dockerfile
-│   │   ├── spectronaut_v20.3.dockerfile
-│   │   ├── spectronaut_v20.4.dockerfile
-│   │   ├── spectronaut_v20.5.dockerfile
-│   │   └── spectronaut_v21.0.dockerfile
-│   └── spectronaut-installer/           # Spectronaut .deb installers (Git LFS)
-│       ├── Spectronaut_19.7.250203.62635.deb
-│       ├── Spectronaut_20.1.250624.92449.deb
-│       ├── Spectronaut_20.2.250922.92449.deb
-│       ├── Spectronaut_20.3.251119.92449.deb
-│       ├── Spectronaut_20.4.260109.92449.deb
-│       ├── Spectronaut_20.5.260227.92449.deb
+│   ├── docker/                          # Templated Dockerfile for Spectronaut images
+│   │   └── panoply_spectronaut.dockerfile
+│   └── spectronaut-installer/           # Spectronaut .deb installer (Git LFS)
 │       └── Spectronaut_21.0.260602.94842.deb
 ├── wdl_workflow/
 │   ├── parallelized_search/             # Main parallel workflow
@@ -33,7 +23,8 @@ spectronaut-parallelization/
 │   │   └── spectronaut_directDIA_v20.wdl
 │   └── spectronaut_modules/             # Standalone reusable modules
 │       └── sne_combine.wdl
-└── doc/                                 # Technical documentation and PDFs
+└── docs/                                # Technical documentation
+    └── biognosys/                       # Vendor PDFs
 ```
 
 **Note:** All files under `src/` are tracked by Git LFS.
@@ -42,20 +33,18 @@ spectronaut-parallelization/
 
 | Dockerfile | Spectronaut Version | Image Tag |
 |------------|-------------------|-----------|
-| `spectronaut_v19.7.dockerfile` | 19.7.250203.62635 | `broadcptacdev/panoply_spectronaut:v19.7` |
-| `spectronaut_v20.3.dockerfile` | 20.3.251119.92449 | `broadcptacdev/panoply_spectronaut:v20.3` |
-| `spectronaut_v20.4.dockerfile` | 20.4.260109.92449 | `broadcptacdev/panoply_spectronaut:v20.4` |
-| `spectronaut_v20.5.dockerfile` | 20.5.260227.92449 | `broadcptacdev/panoply_spectronaut:v20.5` |
-| `spectronaut_v21.0.dockerfile` | 21.0.260602.94842 | `broadcptacdev/panoply_spectronaut:v21.0` |
+| `panoply_spectronaut.dockerfile` | 21.0.260602.94842 | `broadcptacdev/panoply_spectronaut:v21.0` |
 
-All images are based on `ubuntu:22.04` and include google-cloud-cli, dotnet-sdk-8.0, and Spectronaut installed via `.deb`. The license is hardcoded at build time.
+`panoply_spectronaut.dockerfile` is a template: before building, point its `COPY` at the desired `.deb` under `src/spectronaut-installer/` and replace the `<spectronaut-license-key>` placeholder in the `spectronaut activate` directive. The image is based on `ubuntu:22.04` and includes google-cloud-cli, dotnet-sdk-8.0, and Spectronaut installed via `.deb`. The license is baked in at build time.
 
-**Build context is the repository root** — Dockerfiles `COPY src/spectronaut-installer/...`, so build from the repo root with `-f`, not from the `src/docker/` directory:
+**Older image tags (`v19.7`, `v20.3`–`v20.5`) remain published on Docker Hub** and are still referenced by the workflows below, but their Dockerfiles and installers are no longer kept in this repo — those tags can be pulled but not rebuilt from source here. To rebuild one, retrieve the matching `.deb` from Biognosys and adjust the template's `COPY`.
+
+**Build context is the repository root** — the Dockerfile `COPY`s `src/spectronaut-installer/...`, so build from the repo root with `-f`, not from the `src/docker/` directory:
 ```bash
 docker buildx build \
   --platform linux/amd64 \
   -t broadcptacdev/panoply_spectronaut:v21.0 \
-  -f src/docker/spectronaut_v21.0.dockerfile \
+  -f src/docker/panoply_spectronaut.dockerfile \
   --push .
 ```
 The `--platform linux/amd64` flag is required when cross-compiling from Apple Silicon.
