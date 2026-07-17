@@ -12,14 +12,18 @@ This repository contains WDL (Workflow Description Language) workflows and Docke
 spectronaut-parallelization/
 ├── src/
 │   ├── docker/                          # Templated Dockerfile for Spectronaut images
-│   │   └── panoply_spectronaut.dockerfile
+│   │   ├── panoply_spectronaut.dockerfile
+│   │   └── helpers/                     # Shared task helpers, COPYed into the image
+│   │       ├── sn_resource_monitor.sh
+│   │       ├── sn_download.sh
+│   │       ├── sn_import_flags.sh
+│   │       └── tests/                   # Run directly with bash; no framework
 │   └── spectronaut-installer/           # Spectronaut .deb installer (Git LFS)
 │       └── Spectronaut_21.0.260602.94842.deb
 ├── wdl_workflow/
 │   ├── parallelized_search/             # Main parallel workflow
 │   │   └── parallel_spectronaut.wdl
-│   ├── regular_directDIA/               # Non-parallelized single-VM workflows
-│   │   ├── spectronaut_directDIA_v19.7.wdl
+│   ├── regular_directDIA/               # Non-parallelized single-VM workflow
 │   │   └── spectronaut_directDIA_v20.wdl
 │   └── spectronaut_modules/             # Standalone reusable modules
 │       └── sne_combine.wdl
@@ -27,7 +31,7 @@ spectronaut-parallelization/
     └── biognosys/                       # Vendor PDFs
 ```
 
-**Note:** All files under `src/` are tracked by Git LFS.
+**Note:** All files under `src/` are tracked by Git LFS — **except** `src/docker/helpers/**/*.sh`, which `.gitattributes` explicitly excludes. Keep that exclusion: the Dockerfile `COPY`s these scripts directly, so if LFS captured them the image would receive 3-line pointer files instead of shell code and every task would fail. Verify with `git check-attr filter src/docker/helpers/sn_download.sh` — it must not report `lfs`.
 
 ## Docker Images
 
@@ -37,7 +41,9 @@ spectronaut-parallelization/
 
 `panoply_spectronaut.dockerfile` is a template: before building, point its `COPY` at the desired `.deb` under `src/spectronaut-installer/` and replace the `<spectronaut-license-key>` placeholder in the `spectronaut activate` directive. The image is based on `ubuntu:22.04` and includes google-cloud-cli, dotnet-sdk-8.0, and Spectronaut installed via `.deb`. The license is baked in at build time.
 
-**Older image tags (`v19.7`, `v20.3`–`v20.5`) remain published on Docker Hub** and are still referenced by the workflows below, but their Dockerfiles and installers are no longer kept in this repo — those tags can be pulled but not rebuilt from source here. To rebuild one, retrieve the matching `.deb` from Biognosys and adjust the template's `COPY`.
+**Older image tags (`v19.7`, `v20.3`–`v20.5`) remain published on Docker Hub** — `v20.5` is still referenced by `spectronaut_directDIA_v20.wdl` — but their Dockerfiles and installers are no longer kept in this repo, so those tags can be pulled but not rebuilt from source here. To rebuild one, retrieve the matching `.deb` from Biognosys and adjust the template's `COPY`.
+
+**Rebuilding `v21.0` is mandatory when the `sn_*` helpers change.** `parallel_spectronaut.wdl` sources the helper scripts from `/usr/local/bin/` inside the image, so the WDL and the image must ship together — a task run against an image lacking them fails at its `source` line. The tag is mutable, so the rebuilt image must be pushed before the workflow is run.
 
 **Build context is the repository root** — the Dockerfile `COPY`s `src/spectronaut-installer/...`, so build from the repo root with `-f`, not from the `src/docker/` directory:
 ```bash
@@ -57,15 +63,14 @@ The main production workflow. Uses `broadcptacdev/panoply_spectronaut:v21.0`. Th
 
 ### 2. Regular DirectDIA (`wdl_workflow/regular_directDIA/`)
 
-Single-VM non-parallelized workflows:
-- **`spectronaut_directDIA_v19.7.wdl`** — Uses `broadcptacdev/panoply_spectronaut:v19.7`
+Single-VM non-parallelized workflow:
 - **`spectronaut_directDIA_v20.wdl`** — Uses `broadcptacdev/panoply_spectronaut:v20.5`
 
-Both use `version development` WDL. Flow: `list_files` → optional scatter(`convert_htrms` per file) → `spectronaut` (single VM search).
+Uses `version development` WDL. Flow: `list_files` → optional scatter(`convert_htrms` per file) → `spectronaut` (single VM search). Does not source the `sn_*` helpers.
 
 ### 3. SNE Combine Module (`wdl_workflow/spectronaut_modules/sne_combine.wdl`)
 
-Standalone reusable module for combining SNE result files. Uses `version 1.0` WDL. Docker image: `broadcptacdev/panoply_spectronaut:v20.5`.
+Standalone reusable module for combining SNE result files. Uses `version 1.0` WDL. Docker image: `broadcptacdev/panoply_spectronaut:v21.0`. Does not source the `sn_*` helpers, though it shares the `v21.0` image with the parallel workflow.
 
 - **`produce_final_sne=true`** (default): `spectronaut manageSNE --merge` — generates final merged SNE with reports
 - **`produce_final_sne=false`**: `spectronaut combine` — combines SNE files without full report generation
@@ -135,7 +140,7 @@ Phase 5: Merge
 - `average_file_size_gb` (Float, default: 5.0): Used for disk sizing when HTRMS conversion is skipped
 - `disk_size_multiplier` (Float, default: 3.0): Multiplier for raw/HTRMS disk allocation
 - `sne_combine_disk_size_multiplier` (Float, default: 5.0): Multiplier for SNE combine disk
-- `generate_sne_large_experiment` (Boolean, default: false): Use `spectronaut combine` instead of `manageSNE --merge` for combine_sne
+- `generate_sne_large_experiment` (Boolean, default: false): selects the `combine_sne` mode. **`true`** → `spectronaut manageSNE --merge` (full merge with reports) using the higher merge RAM presets; **`false`** (default) → `spectronaut combine`. Note the flag name reads backwards relative to what it does — `true` selects the heavier merge path, not a lightweight large-experiment path.
 - `enzyme_database` (File?): Custom enzyme database (imported via `--importEnzymeDB`)
 - `custom_mod_repository` (File?): Custom modification repository (imported via `--importModRepository`)
 - `convert_schema` (File?): Schema for HTRMS conversion
@@ -161,19 +166,44 @@ CPU and RAM are set via Map lookups keyed on `experiment_type`. RAM for dynamic 
 
 | Task | proteome CPU | proteome RAM | ptm CPU | ptm RAM |
 |------|-------------|-------------|---------|---------|
-| `pulsar_step1_binned` | 64 | 150 GB | 64 | 200 GB |
-| `pulsar_step2_combine_models` | 32 | dynamic (0.8 GB/file, floor 64) | 48 | dynamic (1.2 GB/file) |
-| `pulsar_step3_binned` | 64 | 150 GB | 128 | 200 GB |
-| `combine_final_archives` | 32 | dynamic (1.2 GB/file, floor 64) | 48 | dynamic (1.8 GB/file) |
+| `pulsar_step1_binned` | 50 | 128 GB | 64 | 156 GB |
+| `pulsar_step2_combine_models` | 25 | dynamic (1.0 GB/file) | 32 | dynamic (1.2 GB/file) |
+| `pulsar_step3_binned` | 40 | 96 GB | 50 | 128 GB |
+| `combine_final_archives` | 25 | dynamic (1.0 GB/file) | 32 | dynamic (1.2 GB/file) |
 | `directDIA_single_vm` | 64 | 128 GB | 128 | 256 GB |
-| `dia_analysis_binned` | 64 | 150 GB | 64 | 200 GB |
-| `combine_sne` | 32 | dynamic (5.0 or 3.0 GB/SNE-GB) | 32 | same |
+| `dia_analysis_binned` | 35 | 96 GB | 45 | 128 GB |
+| `combine_sne` | 25 | dynamic (5.0 merge / 3.0 combine GB/file) | 30 | dynamic (6.0 merge / 4.0 combine GB/file) |
 
-All dynamic RAM values have a floor of 64 GB and a cap of 750 GB.
+`htrms_conversion` is not preset-driven: it is fixed at 16 CPU / 32 GB / 300 GB disk.
 
-**CPU Platform:** All parallel workflow tasks use `cpuPlatform: "Intel Cascade Lake"`.
+Dynamic RAM is capped at `dynamic_ram_cap_gb` = **700 GB** (chosen against Compute Engine machine-type limits). Floors differ by task: `pulsar_step2_combine_models` and `combine_final_archives` floor at **128 GB**; `combine_sne` floors at **64 GB**. `combine_sne`'s per-file rate depends on `generate_sne_large_experiment` — the merge presets when true, the combine presets when false.
+
+**CPU Platform:** none is pinned. Each task carries a commented-out `# cpuPlatform: "AMD Milan"` line; uncomment it to constrain placement.
 
 ## Key Implementation Patterns
+
+**Shared Task Helpers (`sn_*`) — baked into the image:**
+Common task logic lives in three scripts under `src/docker/helpers/`, `COPY`ed to `/usr/local/bin/` in the image and `source`d by each Spectronaut task in `parallel_spectronaut.wdl`. They are sourced, not executed, so they define functions rather than run:
+
+| Script | Functions | Purpose |
+|--------|-----------|---------|
+| `sn_resource_monitor.sh` | `sn_monitor_start`, `sn_monitor_report <cpu> <disk_gb> <root>` | cgroup v1/v2 CPU/memory/disk report |
+| `sn_download.sh` | `sn_download_inputs <dest> <paths_file>`, `sn_download_libraries <dest> <paths_file>` | GCS downloads |
+| `sn_import_flags.sh` | `sn_build_import_flags` | Builds the `--importEnzymeDB` / `--importModRepository` prefix |
+
+Task pattern: `set -euo pipefail` → `source` the helpers → `sn_monitor_start` → `sn_download_inputs` → build flags → `spectronaut …` → `sn_monitor_report`.
+
+Conventions to preserve when editing:
+- **`sn_build_import_flags` reads the environment**, not arguments. A task must `export ENZYME_DB=…` and `export MOD_REPO=…` (empty string when the `File?` input is undefined) *before* calling it.
+- **Interpolate `${import_flags}` unquoted.** Word-splitting is what turns the string into separate argv entries; quoting it passes one argument and breaks the command. Same applies to `${cmd_flags}` and `${user_lib_args}`. The resulting shellcheck SC2086 warnings are expected.
+- **`sn_download_inputs` collapses the per-file loop into one `gcloud storage cp -r --read-paths-from-stdin` call** so gcloud parallelizes across sources. It hard-fails if fewer top-level entries land than paths requested — a partial download would otherwise silently search a subset of the data. It falls back to a serial per-file loop when gcloud lacks the flag.
+- **`sn_download_libraries` writes its `-a` flags to stdout** and all progress to stderr; the caller captures it via `user_lib_args="$(…)"`. Keep progress output on stderr or it will corrupt the captured flags.
+- `htrms_conversion` intentionally does not source the helpers: it has no resource monitor and downloads a single file.
+
+Tests are plain bash with a fake `gcloud` on `PATH` — no framework. Run them directly after editing a helper:
+```bash
+for t in src/docker/helpers/tests/*.sh; do bash "$t"; done
+```
 
 **File Management:**
 - Uses `mktemp -d` within Cromwell execution directory to avoid root filesystem space issues
