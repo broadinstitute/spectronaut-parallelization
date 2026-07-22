@@ -1,1 +1,4 @@
 .DS_Store
+
+# Local planning/design docs — not tracked in the repo
+docs/superpowers/
