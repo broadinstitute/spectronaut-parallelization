@@ -872,6 +872,8 @@ task pulsar_step1_binned {
         source /usr/local/bin/sn_download.sh
         # shellcheck source=/dev/null
         source /usr/local/bin/sn_import_flags.sh
+        # shellcheck source=/dev/null
+        source /usr/local/bin/sn_input_flags.sh
 
         sn_monitor_start
 
@@ -886,17 +888,7 @@ task pulsar_step1_binned {
         ls -1 "${input_dir}"
 
         # HTRMS files require -r per file; raw files (incl. timsTOF .d dirs) use -d directory.
-        htrms_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 -name "*.htrms" | wc -l)
-        if [ "${htrms_count}" -gt 0 ]; then
-            cmd_flags=""
-            for f in "${input_dir}"/*.htrms; do
-                if [ -f "$f" ]; then
-                    cmd_flags="${cmd_flags} -r $f"
-                fi
-            done
-        else
-            cmd_flags="-d ${input_dir}"
-        fi
+        cmd_flags="$(sn_build_input_flags "${input_dir}")"
 
         export ENZYME_DB="~{if defined(enzyme_database) then enzyme_database else ''}"
         export MOD_REPO="~{if defined(custom_mod_repository) then custom_mod_repository else ''}"
@@ -1069,6 +1061,8 @@ task pulsar_step3_binned {
         source /usr/local/bin/sn_download.sh
         # shellcheck source=/dev/null
         source /usr/local/bin/sn_import_flags.sh
+        # shellcheck source=/dev/null
+        source /usr/local/bin/sn_input_flags.sh
 
         sn_monitor_start
 
@@ -1089,17 +1083,7 @@ task pulsar_step3_binned {
         # Construct input flags based on actual file type:
         # HTRMS files require -r per file; raw files (incl. timsTOF .d directories) use -d directory.
         # Detect HTRMS by top-level .htrms entries so that files inside a .d directory are ignored.
-        htrms_count=$(find "${input_dir}" -mindepth 1 -maxdepth 1 -name "*.htrms" | wc -l)
-        if [ "${htrms_count}" -gt 0 ]; then
-            cmd_flags=""
-            for f in "${input_dir}"/*.htrms; do
-                 if [ -f "$f" ]; then
-                    cmd_flags="${cmd_flags} -r $f"
-                 fi
-            done
-        else
-            cmd_flags="-d ${input_dir}"
-        fi
+        cmd_flags="$(sn_build_input_flags "${input_dir}")"
 
         export ENZYME_DB="~{if defined(enzyme_database) then enzyme_database else ''}"
         export MOD_REPO="~{if defined(custom_mod_repository) then custom_mod_repository else ''}"
