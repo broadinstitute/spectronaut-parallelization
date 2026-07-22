@@ -67,7 +67,7 @@ Spectronaut is the primary software platform that we use for data-independent ac
    2. **Create Workspace:** Click **Workspaces** &rarr; **"+"**. Assign a name and billing project. See [Working with Terra workspaces](https://support.terra.bio/hc/en-us/articles/360024743371-Working-with-workspaces) for details.
 
 2. **Create Docker Image:**
-   1. Modify the [Dockerfile](src/docker) of your desired Spectronaut version and modify it according to instruction, then build and push the image to a registry, such as [Docker Hub](https://docs.docker.com/docker-hub/quickstart/#step-3-build-and-push-an-image-to-docker-hub) or [Google Cloud Registry](https://docs.cloud.google.com/artifact-registry/docs/docker). 
+   1. Adapt the templated [Dockerfile](src/docker/panoply_spectronaut.dockerfile) for your desired Spectronaut version according to its instructions, then build and push the image to a registry, such as [Docker Hub](https://docs.docker.com/docker-hub/quickstart/#step-3-build-and-push-an-image-to-docker-hub) or [Google Cloud Registry](https://docs.cloud.google.com/artifact-registry/docs/docker). 
       1. If you are new to Docker, check out this [step-by-step guide](https://docs.docker.com/get-started/introduction/build-and-push-first-image/).
    2. **Update Workflow:** In the [WDL file](wdl_workflow/parallelized_search/parallel_spectronaut.wdl), replace the existing `docker` path with your new image path: `docker: "your-registry/your-spectronaut-image:tag"`.
    3. **Import Workflow:** Go to **Library** &rarr; **Workflows** &rarr; **Terra Workflow Repository**. Select **"Create New Workflow"** and upload your updated [workflow file](wdl_workflow/parallelized_search/parallel_spectronaut.wdl). See [Create, edit, and share a new workflow](https://support.terra.bio/hc/en-us/articles/360031366091-Create-edit-and-share-a-new-workflow) for more details.
@@ -88,7 +88,7 @@ Spectronaut is the primary software platform that we use for data-independent ac
 
 ### 2. File Preparation & Upload
 
-1. **Gather Input Files:** Ensure all necessary inputs (see [Input Variables](#input-variables)) are ready for upload.
+1. **Gather Input Files:** Ensure all necessary inputs (see [Input Variables](#bookmark_tabs-input-variables)) are ready for upload.
 2. **Upload Files to Terra Workspace:**
    1. **Find Your Workspace GCS Bucket:** In the **Cloud Information** box of your workspace **Dashboard**, copy the path to its GCS bucket.
    2. **Upload Data:** Upload your files to the GCS bucket using the following commands:
@@ -149,7 +149,7 @@ gcloud storage cp -r "gs://fc-your-bucket/submissions/YOUR-JOB-ID/call-htrms_con
 | `fasta_[2-3]`         | File<br>(Optional) | GCS path to additional protein database.                                                                                                                                                             |
 | `report_schema_[1–4]` | File<br>(Optional) | GCS path to a `*.rs` report schema.                                                                                                                                                                  |
 | `enzyme_database`     | File<br>(Optional) | GCS path to a custom enzyme database for non-standard proteolytic enzymes.                                                                                                                           |
-| `condition_setup`     | File<br>(Optional) | GCS path to a `*.tsv` condition setup file ([template](doc/spectronaut_condition_setup_template.tsv)).                                                                                               |
+| `condition_setup`     | File<br>(Optional) | GCS path to a `*.tsv` condition setup file ([template](docs/spectronaut_condition_setup_template.tsv)).                                                                                               |
 | `json_settings`       | File<br>(Optional) | GCS path to a `*.json` file to override Spectronaut search settings.                                                                                                                                 |
 
 ### 2. HTRMS Conversion
@@ -177,7 +177,7 @@ HTRMS conversion is **highly recommended** for Bruker timsTOF files (`*.d/`) to 
 
 |              Variable              |         Type          | Default |                                                                                               Description                                                                                               |
 | ---------------------------------- | :-------------------: | :-----: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generate_sne_large_experiment`    | Boolean<br>(Optional) | `true`  | Controls generation of the final `*.sne` file. Recommend to set to `false` for large experiments (N > 300 samples), where generating the final `*.sne` file may exceed available memory and disk space. |
+| `generate_sne_large_experiment`    | Boolean<br>(Optional) | `true`  | Selects the SNE combine mode. `true` runs the full `manageSNE --merge` (generates the final merged `*.sne` with reports); `false` runs the lighter `spectronaut combine`. Set to `false` for large experiments (N > 300 samples), where the full merge may exceed available memory and disk. (The name reads backwards: `true` is the heavier merge, not a large-experiment mode.) |
 | `average_file_size_gb`             |  Float<br>(Optional)  |  `20`   | Estimated average input file size in GB; only used when `do_conversion = false`.                                                                                                                        |
 | `disk_size_multiplier`             |  Float<br>(Optional)  |   `3`   | Multiplier applied to total input size for disk allocation across most tasks. Increase if tasks run out of disk space.                                                                                  |
 | `sne_combine_disk_size_multiplier` |  Float<br>(Optional)  |   `6`   | Disk multiplier for the final `sne_combine` step only. Increase if the task runs out of disk space.                                                                                                     |
@@ -225,7 +225,7 @@ Before you start, run through this checklist before submitting your job — it c
 Increase the `disk_size_multiplier` input (e.g., from `3` to `4` or `5`). If the error was in the SNE combine step specifically, increase `sne_combine_disk_size_multiplier`.
 
 **I got a permission error when uploading files — "You do not have access to this bucket".**
-Re-authenticate your machine with your Broad Google account using `gcloud auth login`. This is the most common cause: another user previously signed in on the same computer, and their credentials are being used instead of yours. See the [authentication section](#step-3-authenticate-with-your-google-account) above for details.
+Re-authenticate your machine with your Broad Google account using `gcloud auth login`. This is the most common cause: another user previously signed in on the same computer, and their credentials are being used instead of yours. See the [gcloud CLI setup steps](#1-prerequisites--environment) above for details.
 
 **I'm not sure how many VMs to use.**
 A reasonable starting point is one VM per 20–30 files. For 200 files, `num_vms = 8` or `num_vms = 10` works well. The workflow will not create more VMs than you have files — if you request 20 VMs for 15 files, it will automatically scale down to 15 VMs.
@@ -236,7 +236,7 @@ When `do_pulsar = false`, you must provide at least one spectral library via `sp
 ## :file_folder: Useful Resources
 
 - [Spectronaut Manual](https://biognosys.com/resources/spectronaut-manual/)
-- [Running Spectronaut on a Public Dataset in a Distributed Manner (Spectronaut v20.3+)](doc/20251203_Distributed_Processing_Spectronaut_20_v2.0.pdf)
+- [Running Spectronaut on a Public Dataset in a Distributed Manner (Spectronaut v20.3+)](docs/biognosys/20251203_Distributed_Processing_Spectronaut_20_v2.0.pdf)
 
 ## :phone: Contacts
 
