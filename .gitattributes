@@ -1,1 +1,2 @@
 src/** filter=lfs diff=lfs merge=lfs -text
+src/docker/helpers/**/*.sh !filter !diff !merge text
