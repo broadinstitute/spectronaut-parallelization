@@ -52,7 +52,7 @@ Spectronaut is the primary software platform that we use for data-independent ac
 
 - **Cost-Efficient Computing:** Support for [Preemptible Instances](https://cloud.google.com/compute/docs/instances/preemptible) and [Call Caching](https://support.terra.bio/hc/en-us/articles/360047664872-Call-caching-How-it-works-and-when-to-use-it) drives down compute cost and enables restarting a failed run from the exact point of failure.
 - **Verbose Logging:** Streamlines troubleshooting experience.
-- **Backward Compatible:** Seamlessly reverts to the legacy pipeline when `num_vms = 1`.
+- **Backward Compatible:** Seamlessly reverts to the legacy pipeline when `num_vms = 1` and `search_qc = false`.
 
 ### :mag: How Does Parallelization Work?
 
@@ -207,7 +207,7 @@ flowchart LR
 >   | Persistent disk | `N × 800 GB` | `N × 800 GB` |
 >
 >   So 27 samples is ~1,728 vCPU and ~21 TB; 100 samples is ~6,400 vCPU and ~80 TB (~12,800 vCPU for `ptm`). Check your regional CPU **and** persistent-disk quotas before launching a large QC set — exceeding either shows up as shards queuing indefinitely or failing on quota errors, not as a clean workflow error.
-> - Per-sample `*.sne` files are exposed as the `qc_sne_files` workflow output, so a subset can be re-merged with the standalone [`sne_combine`](wdl_workflow/spectronaut_modules/sne_combine.wdl) workflow without re-running any search.
+> - Per-sample `*.sne` files are exposed as the `qc_sne_files` workflow output, so a subset can be re-merged without re-running any search: copy the chosen `*.sne` files into one GCS folder, then pass that folder as `sne_directory` to the standalone [`sne_combine`](wdl_workflow/spectronaut_modules/sne_combine.wdl) workflow, which takes a single GCS prefix rather than a file array.
 > - QC mode is not depicted in the [parallelization flowchart](#mag-how-does-parallelization-work) above; see the diagram in this section.
 
 ### Resource & Performance 

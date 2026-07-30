@@ -582,8 +582,10 @@ workflow parallel_spectronaut {
             directDIA_single_vm.spectronaut_output,
         ])
         # Per-sample SNE files from QC mode (undefined on non-QC runs). Exposed so a
-        # subset can be re-merged with wdl_workflow/spectronaut_modules/sne_combine.wdl
-        # without re-running any search.
+        # subset can be re-merged without re-running any search: copy the chosen *.sne
+        # files into one GCS folder and pass it as sne_directory to
+        # wdl_workflow/spectronaut_modules/sne_combine.wdl, which takes a single prefix
+        # rather than a file array.
         Array[File]? qc_sne_files = qc_sne
     }
 }
@@ -991,6 +993,9 @@ task qc_directDIA_single_sample {
         # -d adds every Spectronaut-recognized run in a directory, including vendor
         # formats represented as folders (Bruker .d, Waters). Pointing it at the download
         # directory makes this task format-agnostic: no per-extension flag detection.
+        # This matches directDIA_single_vm and dia_analysis_binned; the -r-per-.htrms
+        # form is required only by the lg -se Pulsar tasks (pulsar_step1_binned,
+        # pulsar_step3_binned).
         echo "Starting QC directDIA search for ~{experiment_name}..."
         spectronaut \
             -setTemp "${tmp_dir}" \
