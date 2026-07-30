@@ -104,6 +104,10 @@ Phase 4: DIA Analysis (multi-VM only)
 
 Phase 5: Merge
   combine_sne                        # Merge SNE files + generate reports → spectronaut_output.zip
+
+QC Mode (search_qc=true) — replaces Phases 3-5 entirely
+  scatter(qc_directDIA_single_sample)  # One sample per VM: independent directDIA → .sne
+  → combine_sne as combine_sne_qc      # Merge all per-sample SNE → spectronaut_output.zip
 ```
 
 ### Task Reference
@@ -116,6 +120,7 @@ Phase 5: Merge
 | `sum_floats` | `python:3.9-slim` | Sums HTRMS file sizes for disk allocation |
 | `htrms_conversion` | `broadcptacdev/panoply_spectronaut:v21.0` | Per-file raw → HTRMS conversion |
 | `directDIA_single_vm` | `broadcptacdev/panoply_spectronaut:v21.0` | Single-VM search (num_vms=1) |
+| `qc_directDIA_single_sample` | `broadcptacdev/panoply_spectronaut:v21.0` | Per-sample QC directDIA → .sne (search_qc=true) |
 | `pulsar_step1_binned` | `broadcptacdev/panoply_spectronaut:v21.0` | Intermediate .psar per bin |
 | `pulsar_step2_combine_models` | `broadcptacdev/panoply_spectronaut:v21.0` | Train optimized .qsp models |
 | `pulsar_step3_binned` | `broadcptacdev/panoply_spectronaut:v21.0` | Final .psar per bin with optimized models |
@@ -135,12 +140,13 @@ Phase 5: Merge
 - `fasta_2`, `fasta_3` (File?): Additional FASTA databases
 - `do_conversion` (Boolean, default: true): Convert raw files to HTRMS before search
 - `do_pulsar` (Boolean, default: true): Use Pulsar library generation; set false to use user-provided libraries
+- `search_qc` (Boolean, default: false): QC mode — searches each sample independently by directDIA on its own VM, then merges every per-sample SNE via an aliased `combine_sne` call. Mutually exclusive with both standard branches, which are guarded with `!search_qc`. **Ignores `num_vms`, `do_pulsar` and `spectral_library_1/2/3`**, and short-circuits `validate_skip_pulsar`. Shards reuse the `directDIA_single_vm` CPU/RAM presets with a fixed 800 GB disk (`qc_search_disk_gb`); the QC merge floors disk at 1000 GB (`qc_combine_disk_floor_gb`). Exposes per-sample SNEs as the `qc_sne_files` output.
 - `spectral_library_1/2/3` (String?): GCS paths to user spectral libraries (required if `do_pulsar=false`)
 - `experiment_type` (String, default: "proteome"): `"proteome"` or `"ptm"` — controls resource presets
 - `average_file_size_gb` (Float, default: 5.0): Used for disk sizing when HTRMS conversion is skipped
 - `disk_size_multiplier` (Float, default: 3.0): Multiplier for raw/HTRMS disk allocation
 - `sne_combine_disk_size_multiplier` (Float, default: 5.0): Multiplier for SNE combine disk
-- `generate_sne_large_experiment` (Boolean, default: false): selects the `combine_sne` mode. **`true`** → `spectronaut manageSNE --merge` (full merge with reports) using the higher merge RAM presets; **`false`** (default) → `spectronaut combine`. Note the flag name reads backwards relative to what it does — `true` selects the heavier merge path, not a lightweight large-experiment path.
+- `generate_sne_large_experiment` (Boolean, default: true): selects the `combine_sne` mode. **`true`** (default) → `spectronaut manageSNE --merge` (full merge with reports) using the higher merge RAM presets; **`false`** → `spectronaut combine`. Note the flag name reads backwards relative to what it does — `true` selects the heavier merge path, not a lightweight large-experiment path.
 - `enzyme_database` (File?): Custom enzyme database (imported via `--importEnzymeDB`)
 - `custom_mod_repository` (File?): Custom modification repository (imported via `--importModRepository`)
 - `convert_schema` (File?): Schema for HTRMS conversion
@@ -159,6 +165,7 @@ Phase 5: Merge
 - `n_preemptible_combine_archives` (default: 0)
 - `n_preemptible_dia_analysis` (default: 1)
 - `n_preemptible_combine_sne` (default: 0)
+- `n_preemptible_search_qc` (default: 2)
 
 ### Resource Presets by `experiment_type`
 
@@ -175,6 +182,8 @@ CPU and RAM are set via Map lookups keyed on `experiment_type`. RAM for dynamic 
 | `combine_sne` | 25 | dynamic (5.0 merge / 3.0 combine GB/file) | 30 | dynamic (6.0 merge / 4.0 combine GB/file) |
 
 `htrms_conversion` is not preset-driven: it is fixed at 16 CPU / 32 GB / 300 GB disk.
+
+`qc_directDIA_single_sample` is not in the table because it has no presets of its own: it reuses the `directDIA_single_vm` CPU/RAM row above, with a fixed 800 GB disk per shard regardless of `disk_size_multiplier`. Its scatter width equals the input file count and is **not** capped at 80 the way `create_bins` is, so concurrent vCPU and persistent-disk quota are the practical ceilings on QC fan-out.
 
 Dynamic RAM is capped at `dynamic_ram_cap_gb` = **700 GB** (chosen against Compute Engine machine-type limits). Floors differ by task: `pulsar_step2_combine_models` and `combine_final_archives` floor at **128 GB**; `combine_sne` floors at **64 GB**. `combine_sne`'s per-file rate depends on `generate_sne_large_experiment` — the merge presets when true, the combine presets when false.
 

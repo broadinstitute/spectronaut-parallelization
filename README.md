@@ -43,6 +43,7 @@ Spectronaut is the primary software platform that we use for data-independent ac
 #### Scientific Versatility
 
 - **Comprehensive DIA Support:** Automatically switches between directDIA, hybrid-DIA, and library-based DIA modes according to user preference.
+- **QC Search Mode:** Set `search_qc = true` to search every sample independently on its own VM and merge the results, for instrument QC and method evaluation.
 - **Fully Customizable:** Provides granular access to Spectronaut search parameters to tailor the analysis to your experimental needs.
 - **Proven Reliability:** Validated against the legacy workflow to ensure consistent identification and quantification performance. See [Benchmarking](#bar_chart-benchmarking) for details.
 
@@ -173,6 +174,41 @@ HTRMS conversion is **highly recommended** for Bruker timsTOF files (`*.d/`) to 
 > - When `do_pulsar = false`, at least one spectral library must be provided for a standard library-based DIA analysis. 
 > - When `do_pulsar = true` and a spectral library is provided, the workflow will run hybrid-DIA analysis using the provided library **and** an *in silico* library generated via Pulsar Search.
 
+### 4. QC Search Mode
+
+QC mode searches **each sample independently on its own VM** using single-VM directDIA, then merges every per-sample result into one combined experiment. Use it for instrument QC and method evaluation, where each sample must be assessed on its own rather than against a library aggregated across the whole run set.
+
+|  Variable   |         Type          | Default |                                       Description                                        |
+| ----------- | :-------------------: | :-----: | ---------------------------------------------------------------------------------------- |
+| `search_qc` | Boolean<br>(Optional) | `false` | Runs per-sample QC directDIA (one sample per VM), followed by a single SNE merge.        |
+
+```mermaid
+flowchart LR
+    L["list_files"] --> C{"do_conversion"}
+    C -- "true" --> H["htrms_conversion<br/>1 file per VM"]
+    C -- "false" --> S
+    H --> S["qc_directDIA_single_sample<br/>1 sample per VM"]
+    S --> M["combine_sne<br/>merge all SNE + reports"]
+    M --> Z["spectronaut_output.zip"]
+```
+
+> **:small_red_triangle_down: Important:**
+>
+> - QC samples are typically searched for method evaluation against a spectral library generated from each sample itself via Pulsar Search. `do_pulsar` and `spectral_library_[1-3]` are therefore **ignored in QC mode**, even when provided.
+> - `num_vms` is **also ignored**: QC mode always allocates one VM per sample, so the VM count equals the number of files in `file_directory`. Each VM consumes one Spectronaut license token — confirm your token budget covers the sample count.
+> - HTRMS conversion works normally in QC mode: set `do_conversion = true` and each sample is converted on its own VM before being searched. Only the converted `*.htrms` files are passed to the search VMs — the raw file stays on its conversion VM and is never transferred twice. With `do_conversion = false`, each raw file (or `*.d/` folder) is transferred directly to its own search VM instead. Either way, every search VM receives exactly one run.
+> - If you supply a `condition_setup` file **and** set `do_conversion = true`, its Run Label column must use `.htrms` extensions: run labels come from the data filenames the search actually saw, so `.raw`/`.d` labels will not match and conditions will be dropped from the merged report.
+> - Per-sample searches reuse the single-VM CPU/RAM presets (64 CPU / 128 GB for `proteome`; 128 CPU / 256 GB for `ptm`) with a fixed **800 GB** disk per VM, which deliberately ignores `disk_size_multiplier`. Because fan-out is uncapped, concurrent capacity scales linearly with the sample count `N`:
+>
+>   | | `proteome` | `ptm` |
+>   | --- | :---: | :---: |
+>   | vCPU | `N × 64` | `N × 128` |
+>   | Persistent disk | `N × 800 GB` | `N × 800 GB` |
+>
+>   So 27 samples is ~1,728 vCPU and ~21 TB; 100 samples is ~6,400 vCPU and ~80 TB (~12,800 vCPU for `ptm`). Check your regional CPU **and** persistent-disk quotas before launching a large QC set — exceeding either shows up as shards queuing indefinitely or failing on quota errors, not as a clean workflow error.
+> - Per-sample `*.sne` files are exposed as the `qc_sne_files` workflow output, so a subset can be re-merged with the standalone [`sne_combine`](wdl_workflow/spectronaut_modules/sne_combine.wdl) workflow without re-running any search.
+> - QC mode is not depicted in the [parallelization flowchart](#mag-how-does-parallelization-work) above; see the diagram in this section.
+
 ### Resource & Performance 
 
 |              Variable              |         Type          | Default |                                                                                               Description                                                                                               |
@@ -199,6 +235,7 @@ The `n_preemptible_*` variables control the number of attempts on preemptible VM
 | `n_preemptible_dia_analysis`        | Integer<br>(Optional) |   `1`   |
 | `n_preemptible_combine_sne`         | Integer<br>(Optional) |   `0`   |
 | `n_preemptible_directDIA_single_vm` | Integer<br>(Optional) |   `0`   |
+| `n_preemptible_search_qc`           | Integer<br>(Optional) |   `2`   |
 
 ## :bar_chart: Benchmarking
 
