@@ -321,6 +321,19 @@ spectronaut combine \
   -o <output_dir>
 ```
 
+### QC Per-Sample DirectDIA Search (`search_qc=true`)
+```bash
+spectronaut direct \
+  -s <directDIA_settings> \
+  -fasta <fasta_file> \
+  [-j <json_settings>] \
+  -n <experiment_name>_qc_<index>_<sample_stem> \
+  -o <output_dir> \
+  -d <input_folder_containing_one_run>
+```
+
+Deliberately omits `-con` and `-rs`: the QC task emits `*.sne` only, and reports are generated once from the merged experiment in `combine_sne`. `-d` points at a directory holding exactly one run, so the same command works for `.d` folders, `.raw` and `.htrms` without per-format flags.
+
 ### Single-VM DirectDIA Search (regular_directDIA workflows)
 ```bash
 spectronaut \

@@ -13,6 +13,7 @@
   - [1. Core Search Inputs](#1-core-search-inputs)
   - [2. HTRMS Conversion](#2-htrms-conversion)
   - [3. Hybrid-DIA Search](#3-hybrid-dia-search)
+  - [4. QC Search Mode](#4-qc-search-mode)
   - [Resource \& Performance](#resource--performance)
   - [Preemptible Instance](#preemptible-instance)
 - [:bar\_chart: Benchmarking](#bar_chart-benchmarking)
