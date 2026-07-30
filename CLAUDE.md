@@ -17,6 +17,7 @@ spectronaut-parallelization/
 │   │       ├── sn_resource_monitor.sh
 │   │       ├── sn_download.sh
 │   │       ├── sn_import_flags.sh
+│   │       ├── sn_input_flags.sh
 │   │       └── tests/                   # Run directly with bash; no framework
 │   └── spectronaut-installer/           # Spectronaut .deb installer (Git LFS)
 │       └── Spectronaut_21.0.260602.94842.deb
@@ -104,6 +105,10 @@ Phase 4: DIA Analysis (multi-VM only)
 
 Phase 5: Merge
   combine_sne                        # Merge SNE files + generate reports → spectronaut_output.zip
+
+QC Mode (search_qc=true) — replaces Phases 3-5 entirely
+  scatter(qc_directDIA_single_sample)  # One sample per VM: independent directDIA → .sne
+  → combine_sne as combine_sne_qc      # Merge all per-sample SNE → spectronaut_output.zip
 ```
 
 ### Task Reference
@@ -116,6 +121,7 @@ Phase 5: Merge
 | `sum_floats` | `python:3.9-slim` | Sums HTRMS file sizes for disk allocation |
 | `htrms_conversion` | `broadcptacdev/panoply_spectronaut:v21.0` | Per-file raw → HTRMS conversion |
 | `directDIA_single_vm` | `broadcptacdev/panoply_spectronaut:v21.0` | Single-VM search (num_vms=1) |
+| `qc_directDIA_single_sample` | `broadcptacdev/panoply_spectronaut:v21.0` | Per-sample QC directDIA → .sne (search_qc=true) |
 | `pulsar_step1_binned` | `broadcptacdev/panoply_spectronaut:v21.0` | Intermediate .psar per bin |
 | `pulsar_step2_combine_models` | `broadcptacdev/panoply_spectronaut:v21.0` | Train optimized .qsp models |
 | `pulsar_step3_binned` | `broadcptacdev/panoply_spectronaut:v21.0` | Final .psar per bin with optimized models |
@@ -126,26 +132,26 @@ Phase 5: Merge
 ### Workflow Inputs
 
 **Required:**
-- `num_vms` (Int): Number of VMs; set to 1 for single-VM mode
+- `num_vms` (Int, default: 1): Number of VMs; set to 1 for single-VM mode. Listed here rather than under Optional because it selects the execution branch, but the WDL does supply a default. Ignored entirely when `search_qc = true`.
 - `experiment_name` (String): Name for the experiment
 - `file_directory` (String): GCS path to input files (gs://...)
 - `fasta_1` (File): Primary FASTA database
+- `directDIA_settings` (File): Settings file used by every Spectronaut task except HTRMS conversion, passed as each task's `analysis_schema`
 
 **Optional:**
 - `fasta_2`, `fasta_3` (File?): Additional FASTA databases
-- `do_conversion` (Boolean, default: true): Convert raw files to HTRMS before search
+- `do_conversion` (Boolean, default: false): Convert raw files to HTRMS before search
 - `do_pulsar` (Boolean, default: true): Use Pulsar library generation; set false to use user-provided libraries
+- `search_qc` (Boolean, default: false): QC mode — searches each sample independently by directDIA on its own VM, then merges every per-sample SNE via an aliased `combine_sne` call. Mutually exclusive with both standard branches, which are guarded with `!search_qc`. **Ignores `num_vms`, `do_pulsar` and `spectral_library_1/2/3`**, and short-circuits `validate_skip_pulsar`. Shards reuse the `directDIA_single_vm` CPU/RAM presets with a fixed 800 GB disk (`qc_search_disk_gb`); the QC merge floors disk at 1000 GB (`qc_combine_disk_floor_gb`). Exposes per-sample SNEs as the `qc_sne_files` output.
 - `spectral_library_1/2/3` (String?): GCS paths to user spectral libraries (required if `do_pulsar=false`)
 - `experiment_type` (String, default: "proteome"): `"proteome"` or `"ptm"` — controls resource presets
-- `average_file_size_gb` (Float, default: 5.0): Used for disk sizing when HTRMS conversion is skipped
+- `average_file_size_gb` (Float, default: 20): Used for disk sizing when HTRMS conversion is skipped
 - `disk_size_multiplier` (Float, default: 3.0): Multiplier for raw/HTRMS disk allocation
-- `sne_combine_disk_size_multiplier` (Float, default: 5.0): Multiplier for SNE combine disk
-- `generate_sne_large_experiment` (Boolean, default: false): selects the `combine_sne` mode. **`true`** → `spectronaut manageSNE --merge` (full merge with reports) using the higher merge RAM presets; **`false`** (default) → `spectronaut combine`. Note the flag name reads backwards relative to what it does — `true` selects the heavier merge path, not a lightweight large-experiment path.
+- `sne_combine_disk_size_multiplier` (Float, default: 6): Multiplier for SNE combine disk
+- `generate_sne_large_experiment` (Boolean, default: true): selects the `combine_sne` mode. **`true`** (default) → `spectronaut manageSNE --merge` (full merge with reports) using the higher merge RAM presets; **`false`** → `spectronaut combine`. Note the flag name reads backwards relative to what it does — `true` selects the heavier merge path, not a lightweight large-experiment path.
 - `enzyme_database` (File?): Custom enzyme database (imported via `--importEnzymeDB`)
 - `custom_mod_repository` (File?): Custom modification repository (imported via `--importModRepository`)
 - `convert_schema` (File?): Schema for HTRMS conversion
-- `directDIA_settings` (File?): Settings for search archive generation
-- `DIA_analysis_settings` (File?): Settings for DIA analysis
 - `condition_setup` (File?): Condition setup file
 - `report_schema_1` through `report_schema_4` (File?): Report schema files
 - `json_settings` (File?): JSON settings file
@@ -159,6 +165,7 @@ Phase 5: Merge
 - `n_preemptible_combine_archives` (default: 0)
 - `n_preemptible_dia_analysis` (default: 1)
 - `n_preemptible_combine_sne` (default: 0)
+- `n_preemptible_search_qc` (default: 2)
 
 ### Resource Presets by `experiment_type`
 
@@ -176,6 +183,8 @@ CPU and RAM are set via Map lookups keyed on `experiment_type`. RAM for dynamic 
 
 `htrms_conversion` is not preset-driven: it is fixed at 16 CPU / 32 GB / 300 GB disk.
 
+`qc_directDIA_single_sample` is not in the table because it has no presets of its own: it reuses the `directDIA_single_vm` CPU/RAM row above, with a fixed 800 GB disk per shard regardless of `disk_size_multiplier`. Its scatter width equals the input file count and is **not** capped at 80 the way `create_bins` is, so concurrent vCPU and persistent-disk quota are the practical ceilings on QC fan-out.
+
 Dynamic RAM is capped at `dynamic_ram_cap_gb` = **700 GB** (chosen against Compute Engine machine-type limits). Floors differ by task: `pulsar_step2_combine_models` and `combine_final_archives` floor at **128 GB**; `combine_sne` floors at **64 GB**. `combine_sne`'s per-file rate depends on `generate_sne_large_experiment` — the merge presets when true, the combine presets when false.
 
 **CPU Platform:** none is pinned. Each task carries a commented-out `# cpuPlatform: "AMD Milan"` line; uncomment it to constrain placement.
@@ -183,13 +192,16 @@ Dynamic RAM is capped at `dynamic_ram_cap_gb` = **700 GB** (chosen against Compu
 ## Key Implementation Patterns
 
 **Shared Task Helpers (`sn_*`) — baked into the image:**
-Common task logic lives in three scripts under `src/docker/helpers/`, `COPY`ed to `/usr/local/bin/` in the image and `source`d by each Spectronaut task in `parallel_spectronaut.wdl`. They are sourced, not executed, so they define functions rather than run:
+Common task logic lives in four scripts under `src/docker/helpers/`, `COPY`ed to `/usr/local/bin/` in the image and `source`d by each Spectronaut task in `parallel_spectronaut.wdl`. They are sourced, not executed, so they define functions rather than run:
 
 | Script | Functions | Purpose |
 |--------|-----------|---------|
 | `sn_resource_monitor.sh` | `sn_monitor_start`, `sn_monitor_report <cpu> <disk_gb> <root>` | cgroup v1/v2 CPU/memory/disk report |
 | `sn_download.sh` | `sn_download_inputs <dest> <paths_file>`, `sn_download_libraries <dest> <paths_file>` | GCS downloads |
 | `sn_import_flags.sh` | `sn_build_import_flags` | Builds the `--importEnzymeDB` / `--importModRepository` prefix |
+| `sn_input_flags.sh` | `sn_build_input_flags <input_dir>` | Builds `-r <file>` per top-level `.htrms`, else `-d <dir>` |
+
+`sn_build_input_flags` is used **only** by the `lg -se Pulsar` tasks (`pulsar_step1_binned`, `pulsar_step3_binned`). The tasks that run `direct` or `diaanalysis` — `directDIA_single_vm`, `dia_analysis_binned`, `qc_directDIA_single_sample` — all pass a bare `-d <dir>` instead and must not be "fixed" to use it.
 
 Task pattern: `set -euo pipefail` → `source` the helpers → `sn_monitor_start` → `sn_download_inputs` → build flags → `spectronaut …` → `sn_monitor_report`.
 
@@ -244,6 +256,8 @@ Optional files use WDL `File?` type with conditional inclusion via `~{if defined
 
 ## Spectronaut Command Patterns
 
+Every pattern below passes `-setTemp <temp_dir>`, except **HTRMS Conversion**, which uses no temp directory. When `enzyme_database` and/or `custom_mod_repository` are defined, `sn_build_import_flags` (see Shared Task Helpers above) prepends `--importEnzymeDB <file>` and/or `--importModRepository <file>` right after `-setTemp <temp_dir>` and before the Spectronaut sub-command (`direct`, `diaanalysis`, `lg -se Pulsar`, `manageSNE --merge`, or `combine`); omitted from each pattern below rather than repeated in every one.
+
 ### HTRMS Conversion
 ```bash
 spectronaut -convert \
@@ -252,65 +266,102 @@ spectronaut -convert \
   [-s <convert_schema>]
 ```
 
-### DirectDIA Search Archive Generation (Pulsar Step 1 & 3)
+### Pulsar Step 1 — Intermediate Search Archives (`pulsar_step1_binned`)
 ```bash
-spectronaut direct \
-  -d <input_folder> \
-  -fasta <fasta_file> \
-  [-s <directDIA_settings>] \
-  -o <output_dir> \
-  -setTemp <temp_dir>
-```
-
-### Archive Merging (Pulsar Step 2 — combine models)
-```bash
-spectronaut lg -se Pulsar \
-  -sad <archives_directory> \
-  -k <output_kit_file> \
+spectronaut -setTemp <temp_dir> lg -se Pulsar \
+  <input_flags> \
+  -fasta <fasta_1> \
+  [-fasta <fasta_2>] \
+  [-fasta <fasta_3>] \
+  -rs <directDIA_settings> \
+  --pulsarStage pulsarStep1 \
+  -a <output_dir>/search_archive_step1_bin_<i>.psar \
   -o <output_dir>
 ```
+`<input_flags>` comes from `sn_build_input_flags` (see Shared Task Helpers above): one `-r <file>` per top-level `.htrms`, or a single `-d <dir>` otherwise.
 
-### Archive Merging (combine final archives → .kit)
+### Archive Merging (Pulsar Step 2 — combine models, `pulsar_step2_combine_models`)
 ```bash
-spectronaut lg -se Pulsar \
+spectronaut -setTemp <temp_dir> lg -se Pulsar \
   -sad <archives_directory> \
-  -k <output_kit_file> \
-  -o <output_dir>
-```
-
-### DIA Analysis
-```bash
-spectronaut diaanalysis \
-  [-s <DIA_analysis_settings>] \
-  -fasta <fasta_file> \
-  [-j <json_settings>] \
+  --pulsarStage pulsarStep2 \
   -n <experiment_name> \
+  -rs <directDIA_settings> \
+  --noOutputSubfolder \
+  -o <output_dir>
+```
+Trains the `.qsp` optimized models used by Pulsar Step 3. Passes no `-k` — that flag belongs to the final `.kit` merge below, a separate step this one is sometimes confused with.
+
+### Pulsar Step 3 — Final Search Archives with Optimized Models (`pulsar_step3_binned`)
+```bash
+spectronaut -setTemp <temp_dir> lg -se Pulsar \
+  <input_flags> \
+  -sa <intermediate_archive> \
+  -a <output_dir>/search_archive_bin_<i>.psar \
+  --optimizedModels <optimized_models> \
+  --pulsarStage pulsarStep3 \
+  -o <output_dir> \
+  -n <experiment_name>_bin_<i> \
+  -rs <directDIA_settings>
+```
+
+### Archive Merging (combine final archives → .kit, `combine_final_archives`)
+```bash
+spectronaut -setTemp <temp_dir> lg -se Pulsar \
+  -sad <archives_directory> \
+  -k <output_kit_file> \
+  -o <output_dir> \
+  -s <directDIA_settings>
+```
+
+### DIA Analysis (`dia_analysis_binned`)
+```bash
+spectronaut -setTemp <temp_dir> diaanalysis \
+  -s <directDIA_settings> \
+  -n <experiment_name>_bin_<i> \
   -o <output_dir> \
   -d <data_folder> \
-  -a <search_archive_or_library> \
-  -setTemp <temp_dir>
+  [-a <merged_archive>] \
+  [-a <user_library>] [-a <user_library>] ...
 ```
+No `-fasta` or `-j` — this task searches against a library, not a FASTA database, and takes no JSON settings override. `-a <merged_archive>` appears only when Pulsar produced a merged `.kit` (`do_pulsar=true`); the repeated `-a <user_library>` flags come from `sn_download_libraries` (see Shared Task Helpers above), one per downloaded `user_spectral_libraries` entry — both can be present together for hybrid-DIA.
 
-### SNE Merge (Final Output)
+### SNE Merge (Final Output, `combine_sne` when `generate_sne_large_experiment=true`)
 ```bash
-spectronaut manageSNE --merge \
+spectronaut -setTemp <temp_dir> manageSNE --merge \
   -n <experiment_name> \
   -o <output_dir> \
   -d <sne_directory> \
   [-con <condition_setup>] \
-  [-s <analysis_settings>] \
-  [-rs <report_schema>]
+  -s <directDIA_settings> \
+  [-rs <report_schema_1>] [-rs <report_schema_2>] [-rs <report_schema_3>] [-rs <report_schema_4>]
+```
+`-s` is always passed (not optional); `-rs` is emitted once per defined `report_schema_1`–`4` (0–4 total).
+
+### SNE Combine (Large Experiment Mode, `combine_sne` when `generate_sne_large_experiment=false`)
+```bash
+spectronaut -setTemp <temp_dir> combine \
+  -n <experiment_name> \
+  -o <output_dir> \
+  -d <sne_directory> \
+  [-con <condition_setup>] \
+  -s <directDIA_settings> \
+  [-rs <report_schema_1>] [-rs <report_schema_2>] [-rs <report_schema_3>] [-rs <report_schema_4>]
+```
+Identical to SNE Merge above except the sub-command (`combine` vs `manageSNE --merge`); never passes `-fasta`.
+
+### QC Per-Sample DirectDIA Search (`search_qc=true`, `qc_directDIA_single_sample`)
+```bash
+spectronaut -setTemp <temp_dir> direct \
+  -s <directDIA_settings> \
+  -fasta <fasta_file> \
+  [-j <json_settings>] \
+  -n <experiment_name>_qc_<index>_<sample_stem> \
+  -o <output_dir> \
+  -d <input_folder_containing_one_run>
 ```
 
-### SNE Combine (Large Experiment Mode)
-```bash
-spectronaut combine \
-  -n <experiment_name> \
-  -d <sne_directory> \
-  [-fasta <fasta_file>] \
-  [-rs <report_schema>] \
-  -o <output_dir>
-```
+Deliberately omits `-con` and `-rs`: the QC task emits `*.sne` only, and reports are generated once from the merged experiment in `combine_sne`. `-d` points at a directory holding exactly one run, so the same command works for `.d` folders, `.raw` and `.htrms` without per-format flags.
 
 ### Single-VM DirectDIA Search (regular_directDIA workflows)
 ```bash
