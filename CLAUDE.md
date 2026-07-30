@@ -131,10 +131,11 @@ QC Mode (search_qc=true) — replaces Phases 3-5 entirely
 ### Workflow Inputs
 
 **Required:**
-- `num_vms` (Int): Number of VMs; set to 1 for single-VM mode
+- `num_vms` (Int, default: 1): Number of VMs; set to 1 for single-VM mode. Listed here rather than under Optional because it selects the execution branch, but the WDL does supply a default. Ignored entirely when `search_qc = true`.
 - `experiment_name` (String): Name for the experiment
 - `file_directory` (String): GCS path to input files (gs://...)
 - `fasta_1` (File): Primary FASTA database
+- `directDIA_settings` (File): Settings file used by every Spectronaut task except HTRMS conversion, passed as each task's `analysis_schema`
 
 **Optional:**
 - `fasta_2`, `fasta_3` (File?): Additional FASTA databases
@@ -150,8 +151,6 @@ QC Mode (search_qc=true) — replaces Phases 3-5 entirely
 - `enzyme_database` (File?): Custom enzyme database (imported via `--importEnzymeDB`)
 - `custom_mod_repository` (File?): Custom modification repository (imported via `--importModRepository`)
 - `convert_schema` (File?): Schema for HTRMS conversion
-- `directDIA_settings` (File?): Settings for search archive generation
-- `DIA_analysis_settings` (File?): Settings for DIA analysis
 - `condition_setup` (File?): Condition setup file
 - `report_schema_1` through `report_schema_4` (File?): Report schema files
 - `json_settings` (File?): JSON settings file
@@ -290,7 +289,7 @@ spectronaut lg -se Pulsar \
 ### DIA Analysis
 ```bash
 spectronaut diaanalysis \
-  [-s <DIA_analysis_settings>] \
+  [-s <directDIA_settings>] \
   -fasta <fasta_file> \
   [-j <json_settings>] \
   -n <experiment_name> \
