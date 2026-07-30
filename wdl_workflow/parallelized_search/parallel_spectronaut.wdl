@@ -516,15 +516,19 @@ workflow parallel_spectronaut {
         # ========================================================================
         # QC STEP 1: Per-sample directDIA search (one sample per VM)
         # ========================================================================
-        scatter (qc_sample in files_for_search) {
-            # Strip the run extension so the experiment name is traceable to its source
-            # file. The name must be unique per shard: combine_sne copies every SNE into
-            # one flat directory, so colliding names would silently drop samples.
-            String qc_sample_id = sub(basename(qc_sample), "\\.(d|raw|RAW|htrms)$", "")
+        scatter (i in range(length(files_for_search))) {
+            # Strip the run extension so the experiment name stays traceable to its
+            # source file, and carry the shard index so the name is unique by
+            # construction. Uniqueness is required, not cosmetic: combine_sne copies
+            # every SNE into one flat directory, so two shards sharing a name would
+            # silently drop a sample from the merge. The stem alone is not enough —
+            # a directory holding both S1.raw and S1.d yields the same stem, and with
+            # do_conversion=true both convert to an identically-named S1.htrms.
+            String qc_sample_id = sub(basename(files_for_search[i]), "\\.(d|raw|RAW|htrms)$", "")
 
             call qc_directDIA_single_sample { input:
-                input_files = [qc_sample],
-                experiment_name = experiment_name + "_" + qc_sample_id,
+                input_files = [files_for_search[i]],
+                experiment_name = experiment_name + "_qc_" + i + "_" + qc_sample_id,
                 analysis_schema = directDIA_settings,
                 fasta_1 = fasta_1,
                 fasta_2 = fasta_2,
