@@ -838,6 +838,109 @@ task directDIA_single_vm {
     }
 }
 
+task qc_directDIA_single_sample {
+    input {
+        File fasta_1
+        File analysis_schema
+        Array[String] input_files
+        String experiment_name
+        Int cpu
+        Int ram_gb
+        Int allocated_disk_gb
+        Int n_preemptible
+        File? fasta_2
+        File? fasta_3
+        File? enzyme_database
+        File? custom_mod_repository
+        File? json_settings
+    }
+
+    # input_files holds exactly one GCS URI — a raw timsTOF .d directory, a .raw file, or
+    # a converted .htrms file — downloaded inside the command via gcloud storage cp -r.
+    # Marking it localizationOptional prevents Cromwell from attempting to localize it as
+    # a File, which fails for .d directories, while still including its value in the
+    # call-caching hash key.
+    parameter_meta {
+        input_files: { localizationOptional: true }
+    }
+
+    command <<<
+        set -euo pipefail
+
+        cromwell_root=$(pwd)
+        # shellcheck source=/dev/null
+        source /usr/local/bin/sn_resource_monitor.sh
+        # shellcheck source=/dev/null
+        source /usr/local/bin/sn_download.sh
+        # shellcheck source=/dev/null
+        source /usr/local/bin/sn_import_flags.sh
+
+        sn_monitor_start
+
+        input_dir="${cromwell_root}/work_input"
+        output_dir="${cromwell_root}/out_qc_search"
+        tmp_dir="${cromwell_root}/sn_temp"
+        mkdir -p "${output_dir}" "${tmp_dir}"
+
+        # Download this shard's single sample. gcloud storage cp -r handles timsTOF .d
+        # directories and single-file formats (.raw / .htrms) alike.
+        sn_download_inputs "${input_dir}" ~{write_lines(input_files)}
+
+        echo "Files in input directory:"
+        ls -1 "${input_dir}"
+
+        export ENZYME_DB="~{if defined(enzyme_database) then enzyme_database else ''}"
+        export MOD_REPO="~{if defined(custom_mod_repository) then custom_mod_repository else ''}"
+        import_flags="$(sn_build_import_flags)"
+
+        # -d adds every Spectronaut-recognized run in a directory, including vendor
+        # formats represented as folders (Bruker .d, Waters). Pointing it at the download
+        # directory makes this task format-agnostic: no per-extension flag detection.
+        echo "Starting QC directDIA search for ~{experiment_name}..."
+        spectronaut \
+            -setTemp "${tmp_dir}" \
+            ${import_flags} \
+            direct \
+            -s "~{analysis_schema}" \
+            -fasta "~{fasta_1}" \
+            ~{if defined(fasta_2) then "-fasta " + fasta_2 else ""} \
+            ~{if defined(fasta_3) then "-fasta " + fasta_3 else ""} \
+            ~{if defined(json_settings) then "-j " + json_settings else ""} \
+            -n "~{experiment_name}" \
+            -o "${output_dir}" \
+            -d "${input_dir}" \
+            2>&1 | tee qc_search.log
+
+        sne_count=$(find "${output_dir}" -type f -name "*.sne" | wc -l)
+        if [ "${sne_count}" -eq 0 ]; then
+            echo "ERROR: No .sne file produced for ~{experiment_name}" >&2
+            echo "Output directory contents:" >&2
+            ls -lhR "${output_dir}" >&2
+            exit 1
+        fi
+
+        echo "Moving ${sne_count} SNE file(s)..."
+        find "${output_dir}" -type f -name "*.sne" -exec mv {} "${cromwell_root}/" \;
+        echo "QC directDIA search complete for ~{experiment_name}."
+
+        sn_monitor_report ~{cpu} ~{allocated_disk_gb} "${cromwell_root}"
+    >>>
+
+    output {
+        Array[File] sne_files = glob("*.sne")
+    }
+
+    runtime {
+        docker: "broadcptacdev/panoply_spectronaut:v21.0"
+        cpu: cpu
+        memory: "~{ram_gb}GB"
+        bootDiskSizeGb: 32
+        disks: "local-disk ~{allocated_disk_gb} HDD"
+        preemptible: n_preemptible
+        # cpuPlatform: "AMD Milan"
+    }
+}
+
 task pulsar_step1_binned {
     input {
         File fasta_1
