@@ -138,14 +138,14 @@ QC Mode (search_qc=true) — replaces Phases 3-5 entirely
 
 **Optional:**
 - `fasta_2`, `fasta_3` (File?): Additional FASTA databases
-- `do_conversion` (Boolean, default: true): Convert raw files to HTRMS before search
+- `do_conversion` (Boolean, default: false): Convert raw files to HTRMS before search
 - `do_pulsar` (Boolean, default: true): Use Pulsar library generation; set false to use user-provided libraries
 - `search_qc` (Boolean, default: false): QC mode — searches each sample independently by directDIA on its own VM, then merges every per-sample SNE via an aliased `combine_sne` call. Mutually exclusive with both standard branches, which are guarded with `!search_qc`. **Ignores `num_vms`, `do_pulsar` and `spectral_library_1/2/3`**, and short-circuits `validate_skip_pulsar`. Shards reuse the `directDIA_single_vm` CPU/RAM presets with a fixed 800 GB disk (`qc_search_disk_gb`); the QC merge floors disk at 1000 GB (`qc_combine_disk_floor_gb`). Exposes per-sample SNEs as the `qc_sne_files` output.
 - `spectral_library_1/2/3` (String?): GCS paths to user spectral libraries (required if `do_pulsar=false`)
 - `experiment_type` (String, default: "proteome"): `"proteome"` or `"ptm"` — controls resource presets
-- `average_file_size_gb` (Float, default: 5.0): Used for disk sizing when HTRMS conversion is skipped
+- `average_file_size_gb` (Float, default: 20): Used for disk sizing when HTRMS conversion is skipped
 - `disk_size_multiplier` (Float, default: 3.0): Multiplier for raw/HTRMS disk allocation
-- `sne_combine_disk_size_multiplier` (Float, default: 5.0): Multiplier for SNE combine disk
+- `sne_combine_disk_size_multiplier` (Float, default: 6): Multiplier for SNE combine disk
 - `generate_sne_large_experiment` (Boolean, default: true): selects the `combine_sne` mode. **`true`** (default) → `spectronaut manageSNE --merge` (full merge with reports) using the higher merge RAM presets; **`false`** → `spectronaut combine`. Note the flag name reads backwards relative to what it does — `true` selects the heavier merge path, not a lightweight large-experiment path.
 - `enzyme_database` (File?): Custom enzyme database (imported via `--importEnzymeDB`)
 - `custom_mod_repository` (File?): Custom modification repository (imported via `--importModRepository`)
