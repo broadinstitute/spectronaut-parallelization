@@ -13,6 +13,9 @@ version development
 #     Step 3: Combine SNE files and generate reports
 #   Single VM Mode:
 #     DirectDIA search and analysis in one step
+#   QC Mode (search_qc=true):
+#     One sample per VM: independent directDIA search per sample, then a single
+#     SNE merge. num_vms, do_pulsar and spectral_library_* are ignored.
 #   All Spectronaut tasks (except HTRMS conversion) use directDIA_settings
 workflow parallel_spectronaut {
     input {
@@ -78,6 +81,7 @@ workflow parallel_spectronaut {
         Int n_preemptible_dia_analysis = 1  # DIA analysis preemptible attempts
         Int n_preemptible_combine_sne = 0  # SNE combining preemptible attempts
         Int n_preemptible_htrms_conversion = 2  # Preemptible attempts for conversion
+        Int n_preemptible_search_qc = 2  # QC-mode per-sample search preemptible attempts
         Boolean generate_sne_large_experiment = true  # If true, use manageSNE --merge; if false, use spectronaut combine
 
         # ============================================================================
@@ -87,6 +91,15 @@ workflow parallel_spectronaut {
         String? spectral_library_1   # Optional user-provided spectral library (.kit file, GCS path)
         String? spectral_library_2   # Optional user-provided spectral library (.kit file, GCS path)
         String? spectral_library_3   # Optional user-provided spectral library (.kit file, GCS path)
+
+        # ============================================================================
+        # QC Search Mode Configuration
+        # ============================================================================
+        # When true, every sample is searched independently by directDIA on its own VM
+        # and the per-sample SNE files are merged into one experiment. num_vms, do_pulsar
+        # and spectral_library_* are ignored: QC is method evaluation against a library
+        # generated from each sample itself via Pulsar Search.
+        Boolean search_qc = false
     }
 
     # Compute preset configurations based on experiment_type
@@ -211,6 +224,7 @@ workflow parallel_spectronaut {
     call validate_skip_pulsar { input:
         skip_pulsar = !do_pulsar,
         has_library = has_library,
+        search_qc = search_qc,
     }
 
     # List all raw files in the input directory and count them
@@ -258,7 +272,7 @@ workflow parallel_spectronaut {
     # Bins are created AFTER HTRMS conversion so that when do_conversion=true,
     # the bins contain the converted .htrms GCS paths (not the stale raw paths).
     # files_for_search already resolves to the correct paths in both cases.
-    if (num_vms > 1) {
+    if (num_vms > 1 && !search_qc) {
         call create_bins { input:
             file_paths = files_for_search,
             num_bins = num_vms,
@@ -273,6 +287,14 @@ workflow parallel_spectronaut {
     # Shared RAM ceiling for dynamically-sized non-parallelized tasks (conservative
     # against Compute Engine machine-type limits)
     Int dynamic_ram_cap_gb = 700
+
+    # Fixed per-shard disk for QC-mode search VMs. Each VM handles a single sample, so
+    # the allocation is deliberately generous rather than size-derived, leaving headroom
+    # for Spectronaut temp files on any single-run search.
+    Int qc_search_disk_gb = 800
+
+    # Floor for the QC-mode SNE combine disk allocation
+    Int qc_combine_disk_floor_gb = 1000
 
     # Compute non-parallelized task RAM based on total file count (floor of 128 GB, capped at dynamic_ram_cap_gb)
     Int pulsar_step2_ram_gb = if (ceil(pulsar_step2_base_ram_per_file * list_files.num_files) > dynamic_ram_cap_gb)
@@ -305,16 +327,16 @@ workflow parallel_spectronaut {
     # If num_vms == 1: No binning. calculated_num_vms = 1.
     # If num_vms > 1: Run create_bins (already called above). calculated_num_vms comes from there.
 
-    Int calculated_num_vms = if (num_vms > 1) then read_int(select_first([
+    Int calculated_num_vms = if (num_vms > 1 && !search_qc) then read_int(select_first([
         create_bins.calculated_num_vms_file,
     ])) else 1
 
-    Array[Array[String]] search_file_bins = if (num_vms > 1) then read_json(select_first([
+    Array[Array[String]] search_file_bins = if (num_vms > 1 && !search_qc) then read_json(select_first([
         create_bins.bins_json,
     ])) else []
 
-    # BRANCH A: Single VM Mode (num_vms == 1)
-    if (calculated_num_vms == 1) {
+    # BRANCH A: Single VM Mode (num_vms == 1, search_qc = false)
+    if (!search_qc && calculated_num_vms == 1) {
         # Run classic directDIA on all files in one VM
         call directDIA_single_vm { input:
             experiment_name = experiment_name,
@@ -341,8 +363,8 @@ workflow parallel_spectronaut {
         }
     }
 
-    # BRANCH B: Parallel Mode (num_vms > 1)
-    if (calculated_num_vms > 1) {
+    # BRANCH B: Parallel Mode (num_vms > 1, search_qc = false)
+    if (!search_qc && calculated_num_vms > 1) {
 
         # Calculate approximate size per VM for disk allocation
         Float bin_size_per_vm = finalized_total_size_gb / calculated_num_vms + 20
@@ -484,12 +506,81 @@ workflow parallel_spectronaut {
         }
     }
 
-    # Final output: select from single VM or parallel path
+    # BRANCH C: QC Mode (search_qc = true)
+    # Each sample is searched independently by directDIA on its own VM, then every
+    # per-sample SNE file is merged into a single combined experiment. num_vms is ignored
+    # (QC always allocates one VM per sample), as are do_pulsar and spectral_library_*:
+    # QC is method evaluation against a library generated from each sample itself.
+    if (search_qc) {
+
+        # ========================================================================
+        # QC STEP 1: Per-sample directDIA search (one sample per VM)
+        # ========================================================================
+        scatter (qc_sample in files_for_search) {
+            # Strip the run extension so the experiment name is traceable to its source
+            # file. The name must be unique per shard: combine_sne copies every SNE into
+            # one flat directory, so colliding names would silently drop samples.
+            String qc_sample_id = sub(basename(qc_sample), "\\.(d|raw|RAW|htrms)$", "")
+
+            call qc_directDIA_single_sample { input:
+                input_files = [qc_sample],
+                experiment_name = experiment_name + "_" + qc_sample_id,
+                analysis_schema = directDIA_settings,
+                fasta_1 = fasta_1,
+                fasta_2 = fasta_2,
+                fasta_3 = fasta_3,
+                enzyme_database = enzyme_database,
+                custom_mod_repository = custom_mod_repository,
+                json_settings = json_settings,
+                cpu = directDIA_single_vm_cpu,
+                ram_gb = directDIA_single_vm_ram_gb,
+                allocated_disk_gb = qc_search_disk_gb,
+                n_preemptible = n_preemptible_search_qc,
+            }
+        }
+
+        Array[File] qc_sne = flatten(qc_directDIA_single_sample.sne_files)
+
+        # Disk for the QC merge: total input size scaled by the SNE multiplier, floored
+        # so small QC sets still get workable space.
+        Int qc_combine_disk_gb = if ceil(finalized_total_size_gb * sne_combine_disk_size_multiplier) > qc_combine_disk_floor_gb
+            then ceil(finalized_total_size_gb * sne_combine_disk_size_multiplier)
+            else qc_combine_disk_floor_gb
+
+        # ========================================================================
+        # QC STEP 2: Merge every per-sample SNE and generate reports
+        # ========================================================================
+        call combine_sne as combine_sne_qc { input:
+            experiment_name = experiment_name,
+            sne_files = qc_sne,
+            analysis_schema = directDIA_settings,
+            condition_setup = condition_setup,
+            report_schema_1 = report_schema_1,
+            report_schema_2 = report_schema_2,
+            report_schema_3 = report_schema_3,
+            report_schema_4 = report_schema_4,
+            cpu = combine_sne_cpu,
+            ram_gb = combine_sne_ram_gb,
+            enzyme_database = enzyme_database,
+            custom_mod_repository = custom_mod_repository,
+            n_preemptible = n_preemptible_combine_sne,
+            allocated_disk_gb = qc_combine_disk_gb,
+            generate_sne_large_experiment = generate_sne_large_experiment,
+        }
+    }
+
+    # Final output: select from the parallel, QC or single-VM path. The three branches are
+    # mutually exclusive, so exactly one of these is defined on any given run.
     output {
         File spectronaut_output = select_first([
             combine_sne.spectronaut_output,
+            combine_sne_qc.spectronaut_output,
             directDIA_single_vm.spectronaut_output,
         ])
+        # Per-sample SNE files from QC mode (undefined on non-QC runs). Exposed so a
+        # subset can be re-merged with wdl_workflow/spectronaut_modules/sne_combine.wdl
+        # without re-running any search.
+        Array[File]? qc_sne_files = qc_sne
     }
 }
 
@@ -1537,10 +1628,18 @@ task validate_skip_pulsar {
     input {
         Boolean skip_pulsar
         Boolean has_library
+        Boolean search_qc
     }
 
     command <<<
         set -euo pipefail
+        # QC mode runs per-sample directDIA against a library generated from each sample
+        # itself, so do_pulsar and spectral_library_* are never read. Skip the library
+        # check rather than failing a run over inputs it will not use.
+        if [ "~{search_qc}" = "true" ]; then
+            echo "Validation passed (QC mode)."
+            exit 0
+        fi
         if [ "~{skip_pulsar}" = "true" ] && [ "~{has_library}" = "false" ]; then
             echo "ERROR: skip_pulsar=true requires at least one spectral library." >&2
             echo "Provide spectral_library_1, spectral_library_2, or spectral_library_3." >&2
