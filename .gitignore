@@ -2,3 +2,6 @@
 
 # Local planning/design docs — not tracked in the repo
 docs/superpowers/
+
+# graphify knowledge-graph output
+graphify-out/
